@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+*.xlsm
+*.xlsx
+*.xlsb
+*.result
+GeminiYedek_*
