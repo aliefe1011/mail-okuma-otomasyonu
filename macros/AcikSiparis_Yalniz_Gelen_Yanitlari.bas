@@ -3,7 +3,7 @@ Option Explicit
 
 '============================================================
 '  ACIK SIPARIS MAIL OTOMASYONU - GELEN YANITLARI OKU
-'  Surum: 6.1 (Tablo Eslestirme Fix ve Ayar Butonlari)
+'  Surum: 6.2 (Tedarikci ve kalem bazli guvenli eslestirme)
 '============================================================
 
 Private Const TEST_MODE As Boolean = False
@@ -171,6 +171,8 @@ Private Function StripHtmlArtifacts(ByVal s As String) As String
     re.Pattern = "<script[^>]*>[\s\S]*?</script>"
     s = re.Replace(s, "")
     
+    re.Pattern = "<br\s*/?>|</p\s*>|</div\s*>|</li\s*>"
+    s = re.Replace(s, vbCrLf)
     re.Pattern = "</td[^>]*>"
     s = re.Replace(s, vbTab)
     re.Pattern = "</th[^>]*>"
@@ -331,7 +333,6 @@ Public Sub GelenYanitlariOku()
     cfg.RemoveAll
     If Not LoadOrCollectSettings(cfg) Then Exit Sub
     If Not ValidateSchema(cfg) Then Exit Sub
-    GeminiPreflight
     DoReadReplies cfg
     Exit Sub
 FatalError:
@@ -342,17 +343,34 @@ FatalError:
 End Sub
 
 Private Function ValidateSchema(ByRef cfg As Object) As Boolean
-    Dim msgs As String
-    If cfg("VendorNameCol") = cfg("VendorEmailCol") And cfg("VendorNameCol") > 0 Then
-        msgs = msgs & "- " & T("Tedarikci ADI ve MAIL sutunlari ayni: ") & _
-               NumToColLetter(cfg("VendorNameCol")) & vbCrLf
-    End If
-    If Len(msgs) > 0 Then
-        If MsgBox(T("Asagidaki sorunlar tespit edildi:") & vbCrLf & vbCrLf & msgs & vbCrLf & _
-                  T("Devam edilsin mi?"), vbYesNo + vbExclamation, AppTitle()) <> vbYes Then
-            ValidateSchema = False
-            Exit Function
+    Dim required As Variant, outputs As Variant, inputs As Variant
+    Dim key As Variant, other As Variant, used As Object, col As Long, msgs As String
+    Set used = CreateObject("Scripting.Dictionary")
+    required = Array("OrderNoCol", "KalemNoCol", "VendorCol", "MalzemeCol", "ReplyCol", "ReplyDateCol", "VendorNameCol", "VendorEmailCol")
+    For Each key In required
+        col = CLng(cfg(CStr(key)))
+        If col < 1 Or col > 16384 Then msgs = msgs & CStr(key) & " sutunu gecersiz." & vbCrLf
+    Next key
+    If cfg("VendorNameCol") = cfg("VendorEmailCol") Then msgs = msgs & "Tedarikci adi ve e-posta sutunu ayni olamaz." & vbCrLf
+    inputs = Array("OrderNoCol", "KalemNoCol", "VendorCol", "MalzemeCol", "UretimYeriCol", "UzunMetinCol", "BirimCol", "BakiyeCol")
+    outputs = Array("ReplyCol", "ReplyDateCol", "ReplyFromCol", "MatchMethodCol", "AttachCol", "DurumCol", "TerminCol", "StatusCol")
+    For Each key In outputs
+        col = CLng(cfg(CStr(key)))
+        If col > 0 Then
+            If col > 16384 Then msgs = msgs & CStr(key) & " sutunu gecersiz." & vbCrLf
+            If used.Exists(CStr(col)) Then
+                msgs = msgs & CStr(key) & " baska bir sonuc sutunuyla ayni." & vbCrLf
+            Else
+                used.Add CStr(col), True
+            End If
+            For Each other In inputs
+                If col = CLng(cfg(CStr(other))) Then msgs = msgs & CStr(key) & " kaynak veri sutunuyla ayni: " & CStr(other) & vbCrLf
+            Next other
         End If
+    Next key
+    If Len(msgs) > 0 Then
+        MsgBox "Ayarlar duzeltilmeden okuma baslatilmadi:" & vbCrLf & msgs, vbCritical, AppTitle()
+        Exit Function
     End If
     ValidateSchema = True
 End Function
@@ -799,31 +817,21 @@ Private Sub DoReadReplies(ByRef cfg As Object)
     vendorByDomain.CompareMode = vbTextCompare
 
     Dim loadedCount As Long: loadedCount = 0
+    Dim addresses As Variant, address As Variant
     For r = 2 To vLastRow
         vname = Trim$(SafeStr(vws.Cells(r, vendorNameCol).Value))
-        Dim rawEmail As String: rawEmail = SafeStr(vws.Cells(r, vendorEmailCol).Value)
-        If InStr(rawEmail, ";") > 0 Then rawEmail = Split(rawEmail, ";")(0)
-        If InStr(rawEmail, ",") > 0 Then rawEmail = Split(rawEmail, ",")(0)
-        vemail = LCase$(Trim$(rawEmail))
-        If InStr(UCase$(vname), "BLOKE") > 0 Or InStr(UCase$(vname), "BLOCKED") > 0 Then GoTo NextVendorRow
-        If InStr(vname, "#") > 0 And (InStr(vname, "#N/A") > 0 Or InStr(vname, "#REF") > 0) Then GoTo NextVendorRow
-        If InStr(vemail, "#N/A") > 0 Or InStr(vemail, "#REF") > 0 Then GoTo NextVendorRow
-        If Len(vname) > 0 And InStr(vemail, "@") > 0 Then
-            If Not vendorByEmail.Exists(vemail) Then vendorByEmail.Add vemail, vname
-            vdomain = Mid$(vemail, InStr(vemail, "@") + 1)
-            If Len(vdomain) > 0 Then
-                If vendorByDomain.Exists(vdomain) Then
-                    If vendorByDomain(vdomain) <> "***CAKISMA***" And _
-                       LCase$(CStr(vendorByDomain(vdomain))) <> LCase$(vname) Then
-                        vendorByDomain(vdomain) = "***CAKISMA***"
-                    End If
-                Else
-                    vendorByDomain.Add vdomain, vname
+        If Len(vname) > 0 And InStr(UCase$(vname), "BLOKE") = 0 And InStr(UCase$(vname), "BLOCKED") = 0 Then
+            addresses = Split(Replace(Replace(SafeStr(vws.Cells(r, vendorEmailCol).Value), ",", ";"), vbCrLf, ";"), ";")
+            For Each address In addresses
+                vemail = NormalizeEmail(CStr(address))
+                If Len(vemail) > 0 Then
+                    AddVendorIdentity vendorByEmail, vemail, vname
+                    vdomain = Mid$(vemail, InStr(vemail, "@") + 1)
+                    AddVendorIdentity vendorByDomain, vdomain, vname
+                    loadedCount = loadedCount + 1
                 End If
-            End If
-            loadedCount = loadedCount + 1
+            Next address
         End If
-NextVendorRow:
     Next r
     WriteLog "TEDARIKCI_YUKLE", "", "", "", "Yuklenen tedarikci: " & loadedCount & _
              " / toplam satir: " & (vLastRow - 1)
@@ -862,23 +870,15 @@ NextVendorRow:
             End If
         End If
 
-        On Error Resume Next
-        mailDate = mail.ReceivedTime
-        If Err.Number <> 0 Then Err.Clear: dateSkipCount = dateSkipCount + 1: skipCount = skipCount + 1: GoTo NextMail
-        If mailDate < cutoffDate Then dateSkipCount = dateSkipCount + 1: skipCount = skipCount + 1: GoTo NextMail
-        senderEmail = GetSenderSmtpEx(mail)
-        senderName = mail.SenderName
-        mailSubject = mail.Subject
-        
-        mailBody = mail.HTMLBody
-        If Err.Number <> 0 Or Len(mailBody) = 0 Then
-            Err.Clear
-            mailBody = mail.Body
+        If Not ReadMailFields(mail, mailDate, senderEmail, senderName, mailSubject, mailBody) Then
+            skipCount = skipCount + 1
+            GoTo NextMail
         End If
-        If Err.Number <> 0 Then
-            WriteLog "HATA", "", "", "", "Mail Okuma", Err.Description
-            Err.Clear: GoTo NextMail
+        If mailDate < cutoffDate Then
+            dateSkipCount = dateSkipCount + 1: skipCount = skipCount + 1
+            GoTo NextMail
         End If
+        ' Fields have been read with a local error handler; no Resume Next leaks across mails.
         On Error GoTo 0
 
         mailBody = StripHtmlArtifacts(mailBody)
@@ -893,40 +893,36 @@ NextVendorRow:
 
         vendorName = "": matchMethod = ""
         If Len(senderEmail) > 0 And vendorByEmail.Exists(senderEmail) Then
+            If vendorByEmail(senderEmail) = "***CAKISMA***" Then
+                WriteLog "BELIRSIZ_GONDEREN", "", "", senderEmail, "Ayni e-posta birden fazla tedarikciye kayitli."
+                GoTo NextMail
+            End If
             vendorName = vendorByEmail(senderEmail): matchMethod = "e-posta"
         End If
-        If Len(vendorName) = 0 And Len(senderDomain) > 0 Then
+        If Len(vendorName) = 0 And Len(senderDomain) > 0 And Not IsPublicMailDomain(senderDomain) Then
             If vendorByDomain.Exists(senderDomain) Then
                 If vendorByDomain(senderDomain) <> "***CAKISMA***" Then
                     vendorName = vendorByDomain(senderDomain): matchMethod = "domain"
                 End If
             End If
         End If
-        If Len(vendorName) = 0 Then
-            If IsSiparisKonusu(mailSubject) Or IsSiparisKonusu(mailBody) Then
-                Dim subState As String
-                vendorName = FindVendorInSenderName(vws, vLastRow, vendorNameCol, senderName, subState)
-                If Len(vendorName) > 0 Then matchMethod = "gonderen-adi (" & subState & ")"
-            End If
-        End If
 
-        If Len(vendorName) > 0 And matchMethod <> "e-posta" Then
-            WriteLog "GEMINI_GONDEREN_BELIRSIZ", "", vendorName, senderEmail, "Tedarikci listesine tam e-posta adresini ekleyin."
-            GoTo NextMail
-        End If
         If Len(vendorName) > 0 Then
             replyCount = replyCount + 1
             newReply = ExtractNewReply(mailBody)
-            If Len(newReply) = 0 Then newReply = "(Bos yanit)"
+            If Len(Trim$(newReply)) = 0 Then
+                WriteLog "BOS_YANIT", "", vendorName, senderEmail, "Yeni yanit bos; satir degistirilmedi."
+                GoTo NextMail
+            End If
             attachmentList = SaveAttachments(mail, vendorName)
             sheetUpdated = 0
             For i = 1 To orderSheets.Count
                 upd = WriteReplyToSheet(cfg, orderSheets(i), vendorName, newReply, _
-                    mailDate, senderEmail, matchMethod, attachmentList, tMode)
+                    mailDate, senderEmail, matchMethod, attachmentList, tMode, mailSubject)
                 sheetUpdated = sheetUpdated + upd
             Next i
             matchCount = matchCount + sheetUpdated
-            If sheetUpdated > 0 And Len(entryId) > 0 Then MarkMailProcessed entryId, vendorName
+            If sheetUpdated > 0 And Len(entryId) > 0 And Not tMode Then MarkMailProcessed entryId, vendorName
             WriteLog "YANIT", "", vendorName, senderEmail, matchMethod, _
                      "Konu: " & Left$(mailSubject, 80) & " | Guncellenen: " & sheetUpdated
         Else
@@ -964,13 +960,198 @@ NextMail:
 End Sub
 
 Private Function WriteReplyToSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
-                                   ByVal vendorName As String, ByVal newReply As String, _
-                                   ByVal mailDate As Date, ByVal senderEmail As String, _
-                                   ByVal matchMethod As String, ByVal attachmentList As String, _
-                                   ByVal tMode As Boolean) As Long
-    ' Fail closed: Gemini errors stop the run instead of using legacy fuzzy matching.
-    WriteReplyToSheet = GeminiWriteSheet(cfg, ws, vendorName, newReply, mailDate, _
-        senderEmail, matchMethod, attachmentList, tMode)
+    ByVal vendorName As String, ByVal newReply As String, ByVal mailDate As Date, _
+    ByVal senderEmail As String, ByVal matchMethod As String, ByVal attachmentList As String, _
+    ByVal tMode As Boolean, Optional ByVal mailSubject As String = "") As Long
+    Dim matches As Object, key As Variant, r As Long, n As Long
+    Dim replyText As String
+    Set matches = SelectReplyRows(cfg, ws, vendorName, newReply, mailSubject)
+    If matches.Count = 0 Then
+        gBelirsizCount = gBelirsizCount + 1
+        WriteLog "BELIRSIZ_YANIT", ws.Name, vendorName, senderEmail, _
+            "Tedarikci/siparis/kalem kesin eslesmedi; hicbir satir degistirilmedi."
+        Exit Function
+    End If
+    For Each key In matches.Keys
+        r = CLng(key)
+        If tMode And n >= TEST_MAX_ORDERS Then Exit For
+        ' Inbox order is not chronological. Never let an older reply overwrite a newer one.
+        If IsDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) Then
+            If CDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) >= mailDate Then GoTo NextMatch
+        End If
+        replyText = CStr(matches(key))
+        WriteReplyToRow ws, r, replyText, mailDate, senderEmail, matchMethod & " / kalem-dogrulandi", _
+            attachmentList, CLng(cfg("ReplyCol")), CLng(cfg("ReplyDateCol")), _
+            CLng(cfg("ReplyFromCol")), CLng(cfg("MatchMethodCol")), CLng(cfg("AttachCol")), _
+            CLng(cfg("DurumCol")), CLng(cfg("TerminCol")), CLng(cfg("StatusCol")), ""
+        n = n + 1
+NextMatch:
+    Next key
+    WriteReplyToSheet = n
+End Function
+
+Private Function SelectReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
+    ByVal vendorName As String, ByVal reply As String, ByVal subject As String) As Object
+    Dim result As Object, vendorRows As Collection, allOrders As Object
+    Dim r As Long, lastRow As Long, key As Variant, rowKey As Variant
+    Dim lines As Variant, oneLine As Variant, line As String, activeRow As String
+    Dim hits As Collection, orderNo As String, itemNo As String, material As String
+    Dim lineHasOrder As Boolean, subjectHasOrder As Boolean, lineHasItem As Boolean
+    Dim orderContext As String, processedReply As String
+    Dim orderOK As Boolean, itemOK As Boolean, materialOK As Boolean
+    Dim hasAnyIdentifier As Boolean, ambiguous As Boolean, vendorCount As Long
+    Dim hasLineMaterial As Boolean, score As Long, bestScore As Long
+    Set result = CreateObject("Scripting.Dictionary")
+    Set allOrders = CreateObject("Scripting.Dictionary")
+    allOrders.CompareMode = vbTextCompare
+    Set vendorRows = New Collection
+    lastRow = ws.Cells(ws.Rows.Count, CLng(cfg("OrderNoCol"))).End(xlUp).Row
+    For r = CLng(cfg("StartRow")) To lastRow
+        orderNo = NormalizeOrderNo(SafeStr(ws.Cells(r, CLng(cfg("OrderNoCol"))).Value))
+        If Len(orderNo) >= 4 Then allOrders(orderNo) = True
+        If Len(orderNo) > 0 And NormalizeName(SafeStr(ws.Cells(r, CLng(cfg("VendorCol"))).Value)) = NormalizeName(vendorName) Then
+            vendorRows.Add r
+        End If
+    Next r
+    vendorCount = vendorRows.Count
+    If vendorCount = 0 Then Set SelectReplyRows = result: Exit Function
+    orderContext = subject
+    subjectHasOrder = HasKnownOrder(subject, allOrders) Or HasOrderLabel(subject)
+    lines = Split(Replace(Replace(reply, vbCrLf, vbLf), vbCr, vbLf), vbLf)
+    For Each oneLine In lines
+        line = Trim$(CStr(oneLine))
+        If IsSignatureStart(line) Then Exit For
+        If Len(line) = 0 Then GoTo NextLine
+        If Len(processedReply) > 0 Then processedReply = processedReply & vbCrLf
+        processedReply = processedReply & line
+        lineHasOrder = HasKnownOrder(line, allOrders) Or HasOrderLabel(line)
+        If lineHasOrder Then
+            orderContext = line
+            subjectHasOrder = True
+        End If
+        lineHasItem = HasItemLabel(line)
+        If lineHasOrder Or lineHasItem Then hasAnyIdentifier = True
+        Set hits = New Collection
+        hasLineMaterial = False: bestScore = 0
+        For Each rowKey In vendorRows
+            r = CLng(rowKey)
+            orderNo = SafeStr(ws.Cells(r, CLng(cfg("OrderNoCol"))).Value)
+            itemNo = SafeStr(ws.Cells(r, CLng(cfg("KalemNoCol"))).Value)
+            material = SafeStr(ws.Cells(r, CLng(cfg("MalzemeCol"))).Value)
+            orderOK = False: itemOK = False: materialOK = False
+            If lineHasOrder Then
+                orderOK = ContainsCode(line, orderNo)
+            ElseIf subjectHasOrder Then
+                orderOK = ContainsCode(orderContext, orderNo)
+            End If
+            If Len(Trim$(material)) >= 5 Then materialOK = ContainsCode(line, material)
+            If materialOK Then hasAnyIdentifier = True: hasLineMaterial = True
+            itemOK = ContainsItem(line, itemNo)
+            ' An explicit order in the line takes priority over the mail subject.
+            If lineHasOrder And Not orderOK Then GoTo NextVendorRow
+            If Not lineHasOrder And subjectHasOrder And Not orderOK Then GoTo NextVendorRow
+            If lineHasItem And Not itemOK Then GoTo NextVendorRow
+            score = 0
+            If materialOK Then
+                score = 3
+            ElseIf orderOK And itemOK Then
+                score = 3
+            ElseIf orderOK And Not lineHasItem And InStr(line, vbTab) = 0 Then
+                score = 1
+            End If
+            If score > 0 Then
+                If score > bestScore Then
+                    Set hits = New Collection
+                    bestScore = score
+                End If
+                If score = bestScore Then hits.Add CStr(r)
+            End If
+NextVendorRow:
+        Next rowKey
+        If hits.Count = 1 Then
+            activeRow = CStr(hits(1))
+            If Not result.Exists(activeRow) Then
+                result.Add activeRow, line
+            Else
+                result(activeRow) = result(activeRow) & vbCrLf & line
+            End If
+        ElseIf hits.Count > 1 Then
+            If Len(activeRow) > 0 And Not lineHasOrder And Not lineHasItem And Not hasLineMaterial And ExtractNumbers(line).Count = 0 Then
+                result(activeRow) = result(activeRow) & vbCrLf & line
+            Else
+                ' Multiple candidate items: never pick the first, never fan out to every row.
+                ambiguous = True: activeRow = ""
+            End If
+        ElseIf lineHasOrder Or lineHasItem Or ExtractNumbers(line).Count > 0 Then
+            activeRow = ""
+        ElseIf Len(activeRow) > 0 Then
+            result(activeRow) = result(activeRow) & vbCrLf & line
+        End If
+NextLine:
+    Next oneLine
+    ' Generic reply is safe only when exactly one candidate exists and no conflicting code is present.
+    If result.Count = 0 And vendorCount = 1 And Not hasAnyIdentifier And Not ambiguous And Not subjectHasOrder Then
+        If ExtractNumbers(processedReply & " " & subject).Count = 0 And Len(Trim$(processedReply)) > 0 Then
+            result.Add CStr(vendorRows(1)), processedReply
+        End If
+    End If
+    Set SelectReplyRows = result
+End Function
+
+Private Function HasKnownOrder(ByVal text As String, ByVal orders As Object) As Boolean
+    Dim re As Object, token As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.Pattern = "[A-Za-z0-9_-]+"
+    For Each token In re.Execute(text)
+        If orders.Exists(NormalizeOrderNo(CStr(token.Value))) Then HasKnownOrder = True: Exit Function
+    Next token
+End Function
+
+Private Function ContainsCode(ByVal text As String, ByVal code As String) As Boolean
+    Dim re As Object, normalized As String
+    normalized = Trim$(code)
+    If Len(normalized) = 0 Then Exit Function
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True: re.Global = False
+    If normalized Like String$(Len(normalized), "#") Then
+        normalized = NormalizeOrderNo(normalized)
+        re.Pattern = "(^|[^A-Za-z0-9])0*" & EscapeRegex(normalized) & "([^A-Za-z0-9]|$)"
+    Else
+        re.Pattern = "(^|[^A-Za-z0-9])" & EscapeRegex(normalized) & "([^A-Za-z0-9]|$)"
+    End If
+    ContainsCode = re.Test(text)
+End Function
+
+Private Function HasItemLabel(ByVal text As String) As Boolean
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "(^|[^a-z])(kalem|item|pozisyon)(\s*no)?\s*[:#-]?\s*0*[0-9]+([^0-9]|$)"
+    HasItemLabel = re.Test(NormalizeName(text))
+End Function
+
+Private Function ContainsItem(ByVal text As String, ByVal code As String) As Boolean
+    Dim re As Object, parts As Variant, part As Variant, normalized As String
+    normalized = NormalizeOrderNo(code)
+    If Len(normalized) = 0 Then Exit Function
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "(^|[^a-z])(kalem|item|pozisyon)(\s*no)?\s*[:#-]?\s*0*" & EscapeRegex(normalized) & "([^0-9]|$)"
+    If re.Test(NormalizeName(text)) Then ContainsItem = True: Exit Function
+    If InStr(text, vbTab) > 0 Then
+        parts = Split(text, vbTab)
+        For Each part In parts
+            If NormalizeOrderNo(Trim$(CStr(part))) = normalized Then ContainsItem = True: Exit Function
+        Next part
+    End If
+End Function
+
+Private Function IsSignatureStart(ByVal text As String) As Boolean
+    Dim t As String
+    t = NormalizeName(text)
+    IsSignatureStart = (t = "SAYGILAR" Or t = "SAYGILARIMLA" Or t = "SAYGILARIMIZLA" Or _
+        t = "IYI CALISMALAR" Or t = "BEST REGARDS" Or t = "KIND REGARDS" Or t = "REGARDS")
 End Function
 
 Private Function EnsureOrCreateColumn(ByVal ws As Worksheet, ByVal headerText As String) As Long
@@ -993,58 +1174,9 @@ Private Function EnsureOrCreateColumn(ByVal ws As Worksheet, ByVal headerText As
     EnsureOrCreateColumn = newCol
 End Function
 
-Private Function FindRowByCode(ByVal ws As Worksheet, ByVal code As String, _
-                                ByVal materialCol As Long, ByVal orderCol As Long, _
-                                ByVal itemCol As Long, ByVal startRow As Long, ByVal lastRow As Long) As Long
-    Dim r As Long, cv As String, cvItem As String
-    Dim sipNo As String, kalemNo As String
-    Dim parts() As String
-    
-    If InStr(code, "|") > 0 Then
-        parts = Split(code, "|")
-        sipNo = NormalizeOrderNo(parts(0))
-        kalemNo = NormalizeOrderNo(parts(1))
-    Else
-        sipNo = NormalizeOrderNo(code)
-        kalemNo = ""
-    End If
-    
-    If Len(sipNo) < 4 Then Exit Function
-    
-    If orderCol > 0 And Len(sipNo) >= 6 Then
-        For r = startRow To lastRow
-            cv = NormalizeOrderNo(CStr(ws.Cells(r, orderCol).Value))
-            If cv = sipNo Then
-                If Len(kalemNo) > 0 And itemCol > 0 Then
-                    cvItem = NormalizeOrderNo(CStr(ws.Cells(r, itemCol).Value))
-                    If cvItem = kalemNo Then
-                        FindRowByCode = r: Exit Function
-                    End If
-                Else
-                    FindRowByCode = r: Exit Function
-                End If
-            End If
-        Next r
-    End If
-End Function
 
-Private Function MatchVendor(ByVal normVendor As String, ByVal normRow As String, _
-                             ByVal firstVendor As String, ByVal twoVendor As String) As Boolean
-    If Len(normRow) = 0 Or Len(normVendor) = 0 Then Exit Function
-    If normRow = normVendor Then MatchVendor = True: Exit Function
-    If Len(twoVendor) >= 6 Then
-        Dim twoRow As String: twoRow = GetFirstNthWord(normRow, 2)
-        If Len(twoRow) >= 6 And twoRow = twoVendor Then MatchVendor = True: Exit Function
-    End If
-    If Len(firstVendor) >= 4 Then
-        Dim firstRow As String: firstRow = GetFirstNthWord(normRow, 1)
-        If Len(firstRow) >= 4 And firstRow = firstVendor Then MatchVendor = True: Exit Function
-    End If
-    If Len(normRow) >= 4 And Len(normVendor) >= 4 Then
-        If InStr(1, normRow, normVendor, vbTextCompare) > 0 Or _
-           InStr(1, normVendor, normRow, vbTextCompare) > 0 Then MatchVendor = True: Exit Function
-    End If
-End Function
+
+
 
 Private Sub WriteReplyToRow(ByVal ws As Worksheet, ByVal rowNum As Long, _
                              ByVal newReply As String, ByVal mailDate As Date, _
@@ -1108,60 +1240,7 @@ Private Function AppendReplyHistory(ByVal existing As String, ByVal newReply As 
     End If
 End Function
 
-Private Function ParseSapTerminTable(ByVal body As String) As Object
-    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
-    dict.CompareMode = vbTextCompare
-    Dim clean As String
-    clean = Replace(body, vbCrLf, vbLf): clean = Replace(clean, vbCr, vbLf)
-    Dim lines() As String: lines = Split(clean, vbLf)
-    Dim i As Long, line As String, parts() As String
-    
-    Dim re As Object
-    On Error Resume Next
-    Set re = CreateObject("VBScript.RegExp")
-    re.Global = False: re.IgnoreCase = True
-    re.Pattern = "(\d{1,4}[./-]\d{1,2}[./-]\d{1,4})" ' Tarih formati (örn: 25.10.2023 veya 2023-10-25)
-    
-    For i = LBound(lines) To UBound(lines)
-        line = Trim$(lines(i))
-        If Len(line) > 0 Then
-            parts = Split(line, vbTab) ' StripHtmlArtifacts tablolari Tab ile ayirmisti
-            If UBound(parts) >= 3 Then
-                Dim sipNo As String, kalemNo As String, tarih As String, p As String
-                Dim j As Long
-                sipNo = "": kalemNo = "": tarih = ""
-                
-                For j = 0 To UBound(parts)
-                    p = Trim$(Replace(parts(j), """", ""))
-                    
-                    ' Tarih kontrolü
-                    If re.Test(p) Then
-                        tarih = p
-                    ' Sipariþ No kontrolü (Genellikle 10 haneli ve 04 ile baþlar)
-                    ElseIf p Like "##########" Then
-                        sipNo = p
-                    ' Kalem No kontrolü (Genellikle 5 haneli ve 000 ile baþlar)
-                    ElseIf p Like "#####" Then
-                        kalemNo = p
-                    End If
-                Next j
-                
-                If Len(sipNo) > 0 And Len(tarih) > 0 Then
-                    Dim key As String
-                    If Len(kalemNo) > 0 Then
-                        key = sipNo & "|" & kalemNo
-                    Else
-                        key = sipNo
-                    End If
-                    
-                    If Not dict.Exists(key) Then dict.Add key, tarih
-                End If
-            End If
-        End If
-    Next i
-    On Error GoTo 0
-    Set ParseSapTerminTable = dict
-End Function
+
 
 Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) As Variant
     Dim t As String: t = LCase$(text)
@@ -1367,55 +1446,7 @@ Private Sub WriteTerminReport(ByRef cfg As Object, ByVal scanned As Long, _
     On Error GoTo 0
 End Sub
 
-Private Function ReplyMentionsOrderLine(ByVal replyText As String, ByVal ws As Worksheet, _
-                                        ByVal rowNum As Long, ByVal orderCol As Long, _
-                                        ByVal itemCol As Long, ByVal materialCol As Long, _
-                                        ByVal longTextCol As Long) As Boolean
-    Dim bodyNorm As String, orderNo As String, itemNo As String
-    Dim material As String, longText As String, token As String
-    bodyNorm = NormalizeName(replyText)
-    If Len(bodyNorm) = 0 Then Exit Function
-    If orderCol > 0 Then orderNo = Trim$(CStr(ws.Cells(rowNum, orderCol).Value))
-    If itemCol > 0 Then itemNo = Trim$(CStr(ws.Cells(rowNum, itemCol).Value))
-    If materialCol > 0 Then material = Trim$(CStr(ws.Cells(rowNum, materialCol).Value))
-    If longTextCol > 0 Then longText = Trim$(CStr(ws.Cells(rowNum, longTextCol).Value))
-    If Len(material) >= 5 Then
-        token = NormalizeName(material)
-        If Len(token) >= 5 And InStr(1, bodyNorm, token, vbTextCompare) > 0 Then
-            ReplyMentionsOrderLine = True: Exit Function
-        End If
-    End If
-    If Len(longText) >= 8 Then
-        Dim upperLT As String: upperLT = UCase$(Trim$(longText))
-        Dim skipText As Boolean: skipText = False
-        If upperLT = "EUR" Or upperLT = "USD" Or upperLT = "TRY" Or _
-           upperLT = "ST" Or upperLT = "KG" Or upperLT = "M" Or _
-           upperLT = "M2" Or upperLT = "TKM" Or upperLT = "PAK" Then skipText = True
-        If Not skipText Then
-            token = NormalizeName(longText)
-            If Len(token) >= 8 And InStr(1, bodyNorm, token, vbTextCompare) > 0 Then
-                ReplyMentionsOrderLine = True: Exit Function
-            End If
-        End If
-    End If
-    If Len(orderNo) > 0 Then
-        Dim normOrder As String: normOrder = NormalizeOrderNo(orderNo)
-        Dim bodyNumbers As Object: Set bodyNumbers = ExtractNumbers(replyText)
-        If bodyNumbers.Exists(normOrder) Then
-            ReplyMentionsOrderLine = True: Exit Function
-        End If
-    End If
-    Dim re As Object: Set re = CreateObject("VBScript.RegExp")
-    re.Global = False: re.IgnoreCase = True
-    If Len(itemNo) > 0 Then
-        re.Pattern = "(kalem|kalem no|item|item no|pozisyon)\s*[:#-]?\s*" & EscapeRegex(itemNo) & "([^0-9]|$)"
-        If re.Test(replyText) Then ReplyMentionsOrderLine = True: Exit Function
-    End If
-    If Len(orderNo) > 0 Then
-        re.Pattern = "(siparis|siparis no|satinalma|order|po)\s*[:#-]?\s*" & EscapeRegex(orderNo) & "([^0-9]|$)"
-        If re.Test(replyText) Then ReplyMentionsOrderLine = True: Exit Function
-    End If
-End Function
+
 
 Private Function ExtractNumbers(ByVal text As String) As Object
     Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
@@ -1485,42 +1516,32 @@ Private Function SanitizeFileName(ByVal s As String) As String
 End Function
 
 Private Function ExtractNewReply(ByVal body As String) As String
-    Dim markers As Variant, i As Long, pos As Long, earliest As Long
-    Dim re As Object, m As Object
+    Dim lines As Variant, oneLine As Variant, line As String, result As String
+    Dim re As Object
     body = StripHtmlArtifacts(body)
-    earliest = Len(body) + 1
-    markers = Array("From: ", T("G~onderilmis: "), T("G~onderen: "), T("Kimden: "), _
-        "-----Original Message-----", "-------- Original Message --------", _
-        "-------Original Message-------", "________________________________", _
-        T("-----Orijinal Mesaj-----"), T("----- Orijinal Mesaj -----"), _
-        T("Konu:"), T("Kime:"), T("Tarih:"))
-    For i = LBound(markers) To UBound(markers)
-        pos = InStr(1, body, CStr(markers(i)), vbTextCompare)
-        If pos > 0 And pos < earliest Then earliest = pos
-    Next i
-    On Error Resume Next
+    lines = Split(Replace(Replace(body, vbCrLf, vbLf), vbCr, vbLf), vbLf)
     Set re = CreateObject("VBScript.RegExp")
-    re.Global = False: re.IgnoreCase = True
-    re.Pattern = "\d{1,2}[./]\d{1,2}[./]\d{2,4}\s+\d{1,2}:\d{2}\s+tarihinde\s+.+?yazd"
-    Set m = re.Execute(body)
-    If m.Count > 0 Then
-        pos = m(0).FirstIndex + 1
-        If pos > 0 And pos < earliest Then earliest = pos
-    End If
-    pos = InStr(1, body, "tarihinde", vbTextCompare)
-    If pos > 0 Then
-        Dim yazdiPos As Long
-        yazdiPos = InStr(pos, body, "yazd", vbTextCompare)
-        If yazdiPos > 0 And (yazdiPos - pos) < 150 Then
-            If pos < earliest Then earliest = pos
+    re.IgnoreCase = True
+    re.Pattern = "^(on .+wrote:|.+tarihinde .+yazd[ýi]:|_{10,})$"
+    For Each oneLine In lines
+        line = Trim$(CStr(oneLine))
+        If InStr(line, ":") > 0 Then
+            If IsReplyHeader(Left$(line, InStr(line, ":") - 1)) Then Exit For
         End If
-    End If
-    On Error GoTo 0
-    If earliest <= Len(body) Then
-        ExtractNewReply = Trim$(Left$(body, earliest - 1))
-    Else
-        ExtractNewReply = Trim$(body)
-    End If
+        If InStr(1, line, "Original Message", vbTextCompare) > 0 And Left$(line, 2) = "--" Then Exit For
+        If InStr(1, NormalizeName(line), "ORIJINAL MESAJ", vbTextCompare) > 0 And Left$(line, 2) = "--" Then Exit For
+        If re.Test(line) Then Exit For
+        If Len(result) > 0 Then result = result & vbCrLf
+        result = result & CStr(oneLine)
+    Next oneLine
+    ExtractNewReply = Trim$(result)
+End Function
+
+Private Function IsReplyHeader(ByVal label As String) As Boolean
+    Dim t As String
+    t = NormalizeName(label)
+    IsReplyHeader = (t = "FROM" Or t = "GONDEREN" Or t = "KIMDEN" Or t = "SENT" Or _
+        t = "GONDERILMIS" Or t = "GONDERILDI")
 End Function
 
 Private Function FilterRelevantContent(ByVal raw As String) As String
@@ -1879,19 +1900,31 @@ Private Function GetOutlookApp() As Object
 End Function
 
 Private Function GetInboxFolder(ByVal olNs As Object, ByVal folderPath As String) As Object
-    Dim f As Object, parts() As String, i As Long
-    On Error Resume Next
-    If Len(Trim$(folderPath)) = 0 Then
-        Set f = olNs.GetDefaultFolder(6)
+    Dim f As Object, parts As Variant, i As Long, first As String
+    On Error GoTo Failed
+    Set f = olNs.GetDefaultFolder(6)
+    folderPath = Trim$(Replace(folderPath, "/", "\"))
+    Do While Left$(folderPath, 1) = "\": folderPath = Mid$(folderPath, 2): Loop
+    If Len(folderPath) = 0 Then Set GetInboxFolder = f: Exit Function
+    parts = Split(folderPath, "\")
+    first = CStr(parts(0)): i = 0
+    If LCase$(first) = LCase$(f.Name) Or LCase$(first) = "inbox" Or NormalizeName(first) = "GELEN KUTUSU" Then
+        i = 1
     Else
-        parts = Split(folderPath, "\")
-        Set f = olNs.GetDefaultFolder(6)
-        For i = LBound(parts) To UBound(parts)
-            Set f = f.Folders(CStr(parts(i)))
-        Next i
+        Dim store As Object
+        For Each store In olNs.Folders
+            If LCase$(store.Name) = LCase$(first) Then
+                Set f = store: i = 1: Exit For
+            End If
+        Next store
     End If
-    On Error GoTo 0
+    For i = i To UBound(parts)
+        If Len(Trim$(CStr(parts(i)))) > 0 Then Set f = f.Folders(CStr(parts(i)))
+    Next i
     Set GetInboxFolder = f
+    Exit Function
+Failed:
+    Set GetInboxFolder = Nothing
 End Function
 
 Private Function GetSenderSmtpEx(ByVal mail As Object) As String
@@ -1985,150 +2018,136 @@ Private Sub WriteLog(ByVal islem As String, ByVal sayfa As String, _
     gLogWs.Cells(gLogRow, 7).Value = detay2
     gLogRow = gLogRow + 1
 End Sub
-' Gemini integration. Model output is data only, never VBA or shell commands.
-Private Sub GeminiPreflight()
-    Dim shell As Object, root As String, fso As Object, backup As String
-    Set shell = CreateObject("WScript.Shell")
-    If Len(shell.Environment("PROCESS")("GEMINI_API_KEY")) = 0 Then _
-        Err.Raise vbObjectError + 901, , "Windows GEMINI_API_KEY eksik. Ayarlayip Excel'i yeniden acin."
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    root = GeminiRoot()
-    If Not fso.FileExists(root & "\gemini\bridge.py") Then _
-        Err.Raise vbObjectError + 902, , "gemini\bridge.py bulunamadi. GEMINI_BRIDGE_DIR ayarini kontrol edin."
-    If Len(ThisWorkbook.Path) = 0 Then Err.Raise vbObjectError + 903, , "Once Excel dosyasini kaydedin."
-    backup = ThisWorkbook.Path & "\GeminiYedek_" & Format$(Now, "yyyymmdd_hhnnss") & "_" & _
-        fso.GetBaseName(fso.GetTempName) & "." & fso.GetExtensionName(ThisWorkbook.Name)
-    ThisWorkbook.SaveCopyAs backup
-End Sub
-
-Private Function GeminiRoot() As String
-    GeminiRoot = Environ$("GEMINI_BRIDGE_DIR")
-    If Len(GeminiRoot) = 0 Then GeminiRoot = ThisWorkbook.Path
-End Function
-
-Private Function GeminiJson(ByVal value As String) As String
-    Dim i As Long, ch As String, result As String, code As Long
-    For i = 1 To Len(value)
-        ch = Mid$(value, i, 1)
-        code = AscW(ch)
-        Select Case code
-            Case 34: result = result & Chr$(92) & Chr$(34)
-            Case 92: result = result & Chr$(92) & Chr$(92)
-            Case 0 To 31: result = result & Chr$(92) & "u" & Right$("0000" & Hex$(code), 4)
-            Case Else: result = result & ch
-        End Select
-    Next i
-    GeminiJson = Chr$(34) & result & Chr$(34)
-End Function
-
-Private Sub GeminiWriteUtf8(ByVal path As String, ByVal value As String)
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 2: stream.Charset = "utf-8": stream.Open
-    stream.WriteText value
-    stream.SaveToFile path, 2
-    stream.Close
-End Sub
-
-Private Function GeminiReadUtf8(ByVal path As String) As String
-    Dim stream As Object
-    Set stream = CreateObject("ADODB.Stream")
-    stream.Type = 2: stream.Charset = "utf-8": stream.Open
-    stream.LoadFromFile path
-    GeminiReadUtf8 = stream.ReadText
-    stream.Close
-End Function
-
-Private Function GeminiRun(ByVal request As String) As String
-    Dim fso As Object, shell As Object, source As String, dest As String
-    Dim python As String, command As String, result As String, rc As Long
-    Dim errNum As Long, errText As String
+Private Function ReadMailFields(ByVal mail As Object, ByRef received As Date, _
+    ByRef senderEmail As String, ByRef senderName As String, ByRef subject As String, _
+    ByRef body As String) As Boolean
     On Error GoTo Failed
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    Set shell = CreateObject("WScript.Shell")
-    source = fso.BuildPath(fso.GetSpecialFolder(2), fso.GetTempName)
-    dest = source & ".result"
-    GeminiWriteUtf8 source, request
-    python = Environ$("GEMINI_PYTHON")
-    If Len(python) = 0 Then
-        python = "py -3"
-    Else
-        python = Chr$(34) & python & Chr$(34)
-    End If
-    command = python & " " & Chr$(34) & GeminiRoot() & "\gemini\bridge.py" & Chr$(34) & _
-        " " & Chr$(34) & source & Chr$(34) & " " & Chr$(34) & dest & Chr$(34)
-    rc = shell.Run(command, 0, True)
-    If Not fso.FileExists(dest) Then Err.Raise vbObjectError + 904, , "Python baslatilamadi. Python 3 ve py launcher kurulumunu kontrol edin."
-    result = GeminiReadUtf8(dest)
-    If rc <> 0 Or Left$(result, 5) = "ERROR" Then Err.Raise vbObjectError + 905, , result
-    GeminiRun = result
-    GoTo Cleanup
+    received = 0: senderEmail = "": senderName = "": subject = "": body = ""
+    If mail.Class <> 43 Then Exit Function
+    received = mail.ReceivedTime
+    senderEmail = NormalizeEmail(GetSenderSmtpEx(mail))
+    senderName = SafeStr(mail.SenderName)
+    subject = SafeStr(mail.Subject)
+    ' HTML keeps table cells; plain Body is the fallback for plain-text mails.
+    body = SafeStr(mail.HTMLBody)
+    If Len(body) = 0 Then body = SafeStr(mail.Body)
+    ReadMailFields = True
+    Exit Function
 Failed:
-    errNum = Err.Number: errText = Err.Description
-Cleanup:
-    On Error Resume Next
-    If Not fso Is Nothing Then
-        If fso.FileExists(source) Then fso.DeleteFile source, True
-        If fso.FileExists(dest) Then fso.DeleteFile dest, True
-    End If
-    On Error GoTo 0
-    If errNum <> 0 Then Err.Raise errNum, "Gemini", errText
+    ReadMailFields = False
 End Function
 
-Private Function GeminiWriteSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
-    ByVal vendor As String, ByVal reply As String, ByVal received As Date, _
-    ByVal sender As String, ByVal method As String, ByVal attachments As String, ByVal testMode As Boolean) As Long
-    Dim candidates As String, request As String, output As String, line As Variant, fields As Variant
-    Dim r As Long, lastRow As Long, count As Long, target As Long, d As String
-    Dim allowed As Object, seen As Object, norm As String
-    Set allowed = CreateObject("Scripting.Dictionary")
-    Set seen = CreateObject("Scripting.Dictionary")
-    norm = NormalizeName(vendor)
-    lastRow = ws.Cells(ws.Rows.Count, CLng(cfg("VendorCol"))).End(xlUp).Row
-    For r = CLng(cfg("StartRow")) To lastRow
-        ' Exact normalized vendor only; fuzzy sender/vendor matches do not authorize other rows.
-        If NormalizeName(SafeStr(ws.Cells(r, CLng(cfg("VendorCol"))).Value)) = norm Then
-            If IsDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) Then
-                If CDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) >= received Then GoTo NextCandidate
-            End If
-            If allowed.Count >= 500 Then Err.Raise vbObjectError + 906, , "500'den fazla aday satir: islemi daraltin."
-            If Len(candidates) > 0 Then candidates = candidates & ","
-            candidates = candidates & "{" & GeminiJson("row") & ":" & CStr(r) & "," & _
-                GeminiJson("order") & ":" & GeminiJson(SafeStr(ws.Cells(r, CLng(cfg("OrderNoCol"))).Value)) & "," & _
-                GeminiJson("item") & ":" & GeminiJson(SafeStr(ws.Cells(r, CLng(cfg("KalemNoCol"))).Value)) & "," & _
-                GeminiJson("material") & ":" & GeminiJson(SafeStr(ws.Cells(r, CLng(cfg("MalzemeCol"))).Value)) & "}"
-            allowed.Add CStr(r), True
-        End If
-NextCandidate:
-    Next r
-    If allowed.Count = 0 Then Exit Function
-    request = "{" & GeminiJson("body") & ":" & GeminiJson(reply) & "," & _
-        GeminiJson("received_at") & ":" & GeminiJson(Format$(received, "yyyy-mm-dd")) & "," & _
-        GeminiJson("candidates") & ":[" & candidates & "]}"
-    output = GeminiRun(request)
-    If Len(output) = 0 Then
-        WriteLog "GEMINI_BELIRSIZ", ws.Name, vendor, sender, "Guvenilir eslesme yok; satir degistirilmedi."
-        Exit Function
-    End If
-    For Each line In Split(output, vbLf)
-        fields = Split(CStr(line), vbTab)
-        If UBound(fields) <> 3 Then Err.Raise vbObjectError + 907, , "Gemini sonuc bicimi hatali."
-        target = CLng(fields(0))
-        If Not allowed.Exists(CStr(target)) Or seen.Exists(CStr(target)) Then _
-            Err.Raise vbObjectError + 908, , "Gemini satiri dogrulanamadi."
-        seen.Add CStr(target), True
-        If testMode And count >= TEST_MAX_ORDERS Then Exit For
-        ' Bypass old free-text date/status heuristics. Apply validated structured fields directly.
-        WriteReplyToRow ws, target, CStr(fields(3)), received, sender, "Gemini / " & method, attachments, _
-            CLng(cfg("ReplyCol")), CLng(cfg("ReplyDateCol")), CLng(cfg("ReplyFromCol")), _
-            CLng(cfg("MatchMethodCol")), CLng(cfg("AttachCol")), 0, 0, CLng(cfg("StatusCol")), ""
-        If CLng(cfg("DurumCol")) > 0 Then ws.Cells(target, CLng(cfg("DurumCol"))).Value = CStr(fields(2))
-        d = CStr(fields(1))
-        If Len(d) > 0 And CLng(cfg("TerminCol")) > 0 Then
-            ws.Cells(target, CLng(cfg("TerminCol"))).Value = DateSerial(CInt(Left$(d, 4)), CInt(Mid$(d, 6, 2)), CInt(Right$(d, 2)))
-            ws.Cells(target, CLng(cfg("TerminCol"))).NumberFormat = "dd.mm.yyyy"
-        End If
-        count = count + 1
-    Next line
-    GeminiWriteSheet = count
+Private Function NormalizeEmail(ByVal value As String) As String
+    Dim leftPos As Long, rightPos As Long
+    value = LCase$(Trim$(value))
+    leftPos = InStr(value, "<"): rightPos = InStr(value, ">")
+    If leftPos > 0 And rightPos > leftPos Then value = Mid$(value, leftPos + 1, rightPos - leftPos - 1)
+    value = Trim$(Replace(value, "mailto:", ""))
+    If InStr(value, "@") < 2 Or InStr(value, " ") > 0 Or InStr(value, "#") > 0 Then Exit Function
+    NormalizeEmail = value
 End Function
+
+Private Sub AddVendorIdentity(ByVal dict As Object, ByVal identity As String, ByVal vendor As String)
+    If dict.Exists(identity) Then
+        If NormalizeName(CStr(dict(identity))) <> NormalizeName(vendor) Then dict(identity) = "***CAKISMA***"
+    Else
+        dict.Add identity, vendor
+    End If
+End Sub
+
+Private Function IsPublicMailDomain(ByVal domain As String) As Boolean
+    Select Case LCase$(domain)
+        Case "gmail.com", "googlemail.com", "hotmail.com", "hotmail.com.tr", "outlook.com", _
+             "outlook.com.tr", "live.com", "msn.com", "yahoo.com", "yahoo.com.tr", "icloud.com", "yandex.com", "yandex.com.tr"
+            IsPublicMailDomain = True
+    End Select
+End Function
+
+Private Function HasOrderLabel(ByVal text As String) As Boolean
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "(^|[^a-z])(siparis|order|po|satinalma)(\s*(no|numarasi))?\s*[:#-]?\s*[0-9]{4,}([^0-9]|$)"
+    HasOrderLabel = re.Test(NormalizeName(text))
+End Function
+
+' Run manually in Excel: no Outlook, no API, temporary workbook only.
+Public Sub MailOkumaOzTest()
+    Dim wb As Workbook, ws As Worksheet, cfg As Object, got As Object
+    Dim passed As Long, errText As String, n As Long
+    On Error GoTo Failed
+    Set wb = Workbooks.Add(xlWBATWorksheet)
+    Set ws = wb.Worksheets(1)
+    Set cfg = CreateObject("Scripting.Dictionary")
+    cfg("StartRow") = 2: cfg("OrderNoCol") = 1: cfg("KalemNoCol") = 2
+    cfg("VendorCol") = 3: cfg("MalzemeCol") = 4
+    cfg("ReplyCol") = 8: cfg("ReplyDateCol") = 9: cfg("ReplyFromCol") = 10
+    cfg("MatchMethodCol") = 11: cfg("AttachCol") = 12: cfg("StatusCol") = 13
+    cfg("DurumCol") = 14: cfg("TerminCol") = 15
+    ws.Cells(2, 1).Value = "4500000001": ws.Cells(2, 2).Value = "00010"
+    ws.Cells(2, 3).Value = "ALFA": ws.Cells(2, 4).Value = "MAT10001"
+    ws.Cells(3, 1).Value = "4500000001": ws.Cells(3, 2).Value = "00020"
+    ws.Cells(3, 3).Value = "ALFA": ws.Cells(3, 4).Value = "MAT20002"
+    ws.Cells(4, 1).Value = "4500000002": ws.Cells(4, 2).Value = "10"
+    ws.Cells(4, 3).Value = "BETA": ws.Cells(4, 4).Value = "MAT30003"
+    ws.Cells(5, 1).Value = "4500000003": ws.Cells(5, 2).Value = "10"
+    ws.Cells(5, 3).Value = "ALFA": ws.Cells(5, 4).Value = "MAT40004"
+
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "4500000001 kalem 10 yarin teslim", "")
+    ReplyAssert got.Count = 1 And got.Exists("2"), "Siparis ve kalem", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "4500000001 yarin teslim", "")
+    ReplyAssert got.Count = 0, "Belirsiz siparis iki kaleme yayilmamali", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "MAT20002 yarin teslim", "")
+    ReplyAssert got.Count = 1 And got.Exists("3"), "Malzeme kodu", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "4500000001 MAT20002 yarin teslim", "")
+    ReplyAssert got.Count = 1 And got.Exists("3"), "Siparis ve malzeme ayni kalemi secmeli", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "4500000002 kalem 10 yarin teslim", "")
+    ReplyAssert got.Count = 0, "Baska tedarikciye yazilmamali", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "Kalem no: 20 yarin teslim", "RE: 4500000001")
+    ReplyAssert got.Count = 1 And got.Exists("3"), "Konu siparisi ve yanit kalemi", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", _
+        "4500000001" & vbTab & "00010" & vbTab & "11.11.2026" & vbCrLf & _
+        "4500000001" & vbTab & "00020" & vbTab & "12.11.2026", "")
+    ReplyAssert got.Count = 2, "Tabloda iki ayri kalem", passed
+    ReplyAssert InStr(CStr(got("2")), "12.11.2026") = 0 And InStr(CStr(got("3")), "11.11.2026") = 0, "Tarihler kalemler arasinda karismamali", passed
+    ws.Cells(3, 4).Value = "MAT10001"
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "MAT10001 yarin teslim", "")
+    ReplyAssert got.Count = 0, "Tekrarlayan malzeme belirsiz", passed
+    ws.Cells(3, 4).Value = "MAT20002"
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "Siparis 4500000001" & vbCrLf & "Kalem 20" & vbCrLf & "Yarin teslim", "")
+    ReplyAssert got.Count = 1 And got.Exists("3"), "Onceki satirdan siparis baglami", passed
+    ReplyAssert InStr(CStr(got("3")), "Yarin teslim") > 0, "Devam satiri kaybolmamali", passed
+    ReplyAssert Not ContainsCode("145000000011", "4500000001"), "Kod alt dize olmamali", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "Yarin teslim edecegiz", "")
+    ReplyAssert got.Count = 0, "Genel yanit coklu siparise yayilmamali", passed
+    Set got = SelectReplyRows(cfg, ws, "BETA", "Yarin teslim edecegiz", "")
+    ReplyAssert got.Count = 1 And got.Exists("4"), "Tek adayda genel yanit", passed
+    Set got = SelectReplyRows(cfg, ws, "BETA", "Saygilarimla", "")
+    ReplyAssert got.Count = 0, "Yalnizca imza olan yanit yazilmamali", passed
+    ReplyAssert ExtractNewReply("Termin konusu: 12.11.2026" & vbCrLf & "From: buyer@example.invalid" & vbCrLf & "eski metin") = "Termin konusu: 12.11.2026", "Alintilanan eski mail ayrilmali", passed
+    ReplyAssert InStr(StripHtmlArtifacts("<p>bir</p><p>iki</p>"), vbCrLf) > 0, "HTML paragraflari korunmali", passed
+    ReplyAssert NormalizeEmail("Ali <ALI@example.invalid>") = "ali@example.invalid", "Gonderen adresi", passed
+    ReplyAssert IsPublicMailDomain("gmail.com"), "Ortak domain eslestirilmemeli", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "MAT10001 yarin teslim", "Siparis 4500000002")
+    ReplyAssert got.Count = 0, "Celisen konu siparisi", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "Siparis 4999999999 yarin teslim", "")
+    ReplyAssert got.Count = 0, "Listede olmayan siparis", passed
+    n = WriteReplyToSheet(cfg, ws, "ALFA", "4500000001 kalem 10 11.11.2026 teslim", DateSerial(2026, 11, 4), "test@example.invalid", "test", "", False)
+    ReplyAssert n = 1 And Len(SafeStr(ws.Cells(3, 8).Value)) = 0 And Len(SafeStr(ws.Cells(4, 8).Value)) = 0, "Gercek yazma yalnizca hedef satira", passed
+    n = WriteReplyToSheet(cfg, ws, "ALFA", "4500000001 kalem 10 10.11.2026 teslim", DateSerial(2026, 11, 3), "test@example.invalid", "test", "", False)
+    ReplyAssert n = 0 And InStr(SafeStr(ws.Cells(2, 8).Value), "10.11.2026") = 0, "Eski mail yeni yaniti ezmemeli", passed
+    wb.Close SaveChanges:=False
+    MsgBox passed & " kontrol gecti. Outlook'a baglanilmadi; asil kitap degistirilmedi.", vbInformation
+    Exit Sub
+Failed:
+    errText = Err.Description
+    On Error Resume Next
+    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    On Error GoTo 0
+    MsgBox "Oz test basarisiz: " & errText, vbCritical
+End Sub
+
+Private Sub ReplyAssert(ByVal condition As Boolean, ByVal title As String, ByRef passed As Long)
+    If Not condition Then Err.Raise vbObjectError + 620, "MailOkumaOzTest", title
+    passed = passed + 1
+End Sub

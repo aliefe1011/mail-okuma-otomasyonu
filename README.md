@@ -1,33 +1,36 @@
-# Excel / Outlook sipariş yanıtlarına Gemini desteği
+# Outlook gelen yanıtlarını Excel'e okuma — VBA 6.2
 
-Gelen tedarikçi yanıtlarını Gemini ile yorumlar, doğrulanan sipariş kalemlerine yanıt, durum ve termin işler. Mail oluşturma modülü verilen dosyayla **bayt bayt aynıdır**. Mail gönderme, silme veya Gemini tarafından komut çalıştırma eklenmez. Kullanım: tabloyu doldur, `GelenYanitlariOku` makrosunu başlat.
+**Python, PowerShell, Gemini veya API anahtarı gerekmez.** Çalışan mail oluşturma modülüne dokunulmadı. Bu sürüm, yanıtların yanlış sipariş/kalem satırına yazılmasını hedefler.
 
-## Windows'ta bir defalık kurulum
+## Bir defalık güncelleme
 
-Gerekenler: masaüstü Excel, **klasik Outlook** ve açık Outlook profili, Python 3.10+ ve `py` launcher, internet ve Gemini API erişimi. Yeni Outlook, Excel Web ve macOS desteklenmez. Python harici paket istemez.
+1. Mevcut Excel dosyanızın kopyasını alın; önce bu kopyada deneyin. Dosya `.xlsm` olmalı. Masaüstü Excel ve **klasik Outlook** gereklidir.
+2. `macros/AcikSiparis_Yalniz_Gelen_Yanitlari.bas` dosyasını indirin. GitHub dosya sayfasında **Download raw file** düğmesini kullanın; web sayfasını `.bas` diye kaydetmeyin.
+3. Excel'de `Alt+F11`. Soldaki proje ağacından **OnlyReadReplies** modülüne sağ tıklayın; eski modülü dışa aktararak yedekleyin ve kaldırın. Diğer modüllere, özellikle mail oluşturma modülüne dokunmayın.
+4. `File > Import File` ile yeni `.bas` dosyasını ekleyin. `Debug > Compile VBAProject` çalıştırın. Türkçe VBA dışa aktarma kodlaması Windows-1254 korunur; Türkçe olmayan Windows'ta karakterleri ayrıca kontrol edin.
+5. `Alt+F8` → **MailOkumaOzTest** → Çalıştır. Bu kontrol geçici bir kitap açar, örnek satırlarda eşleştirme ve gerçek hücre yazma kontrolleri yapar, kitabı kaydetmeden kapatır. Outlook'a bağlanmaz, gerçek sipariş verisini değiştirmez. Başarılıysa **23 kontrol gecti** mesajı beklenir.
+6. Outlook açıkken `Alt+F8` → **GelenYanitlariOku** → Çalıştır. Kayıtlı `Ayarlar` sayfasını kontrol edip devam edin. Sonucu kopya kitapta doğruladıktan sonra asıl kitaba aynı modülü aktarın.
 
-1. Sohbette paylaşılan API anahtarını iptal edip Google AI Studio'da yenisini oluşturun. Anahtarı sohbete veya depoya yazmayın.
-2. Depoyu Windows bilgisayarına indirin/klonlayın. Excel'i tamamen kapatın. Bu klasörde PowerShell açıp `./Kurulum.ps1` çalıştırın. Kurumunuzun betik çalıştırma politikası engelliyorsa yöneticinizin onaylı yöntemini kullanın. Betik anahtarı gizli girişle sorar, sentetik siparişle **gerçek Gemini çağrısı** yapar ve başarılıysa kullanıcı ortam değişkenlerini ayarlar. E-posta verisi bu testte gönderilmez. Anahtar Windows kullanıcı ortamında saklanır; bu bilgisayardaki aynı kullanıcı süreçleri okuyabilir.
-3. Mevcut Excel dosyanızın yedeğini alın ve `.xlsm` olarak kaydedin. `Alt+F11` ile VBA düzenleyicisini açın. Eski `OnlyReadReplies` modülünü dışa aktararak saklayın ve projeden kaldırın. `File > Import File` ile `macros/AcikSiparis_Yalniz_Gelen_Yanitlari.bas` dosyasını aktarın. Aynı isimde iki modül bırakmayın.
-4. Mail oluşturma modülü zaten varsa **değiştirmeyin**. Yoksa `macros/Mail_Olusturma_Yalniz_Taslak.bas` dosyasını aktarın. Gelen dosyanın içeriği aynen korunmuştur.
-5. `Debug > Compile VBAProject` çalıştırın. Okuma modülü Türkçe Windows VBA kodlamasıyla (Windows-1254), taslak modülü özgün kodlamasıyla saklanır. Türkçe olmayan Windows sisteminde metinleri ve derlemeyi ayrıca kontrol edin.
-6. Excel'i yeniden açın. Mevcut `Ayarlar` sayfasındaki sipariş/tedarikçi sayfalarını ve sütunlarını kontrol edin. Önce **kopya çalışma kitabında** `GelenYanitlariOku` çalıştırın. İlk kurulumda eski makronun ayar soruları devam eder; sonraki çalışmalarda kayıtlı ayarlar kullanılır.
+## Düzeltmeler
 
-`GEMINI_BRIDGE_DIR` depo ana klasörüdür. Depoyu taşırsanız bu değişkeni güncelleyin. Varsayılan model `gemini-2.5-flash`; hesabınıza uygun model için `GEMINI_MODEL` değiştirilebilir. Özel Python yolu gerekiyorsa `GEMINI_PYTHON` içine yalnızca `python.exe` tam yolunu yazın. API anahtarını Excel hücresine, VBA'ya veya komut satırına koymayın.
+- Satırlar önce **aynı tedarikçiye** göre sınırlandırılır. Ad karşılaştırması harf, Türkçe karakter ve noktalama farklarını normalize eder; tedarikçi listesindeki ve sipariş tablosundaki unvanların bunun dışında tutarlı olması gerekir. Benzer ilk kelime tek başına yetmez.
+- Sipariş numarasıyla ilk bulunan satıra yazılmaz. Aynı siparişin birden fazla kalemi varsa **kalem veya benzersiz malzeme kodu** gerekir. Belirsiz yanıt hiçbir satıra topluca yayılmaz; eski `UpdateAllLines / B6 = EVET` ayarı bu davranışı açmaz.
+- Konudaki sipariş numarası, gövdedeki kalem bilgisiyle birlikte kullanılabilir. Tablo hücreleri ve HTML satır sonları korunur. `00010` ile `10` aynı kalem sayılır. Farklı kalemlerin yanıt metinleri ve tarihleri birbirine karıştırılmaz.
+- Sipariş başlığı, ardından kalem ve termin ayrı satırlarda yazılmışsa önceki sipariş bağlamı korunur. Birden fazla kalemi aynı belirsiz cümlede belirten yanıtlar otomatik yayılmaz.
+- Eski alıntı e-postalar satır başındaki gönderen başlığıyla ayrılır; yanıt içindeki sıradan `Konu:` / `Tarih:` kelimeleri metni kesmez. Agresif içerik filtresinin sipariş kodlarını/satır düzenini silmesi kaldırıldı.
+- Tedarikçi hücresindeki noktalı virgül/virgülle ayrılmış bütün e-posta adresleri okunur. Çakışan adresler işlenmez. Gmail/Hotmail gibi ortak alan adları tedarikçi tanımak için kullanılmaz; gönderen-adı benzerliğiyle otomatik eşleştirme kaldırıldı.
+- Geçersiz Outlook öğeleri kendi hata işleyicisiyle atlanır; bir önceki mailin bilgileri yeniden kullanılmaz. Klasör bulunamazsa yanlış klasöre sessizce devam edilmez.
+- Eski tarihli yanıt, satırdaki yeni yanıtı ezmez. Çakışan sonuç/kaynak sütunu ayarları yazma başlamadan reddedilir.
 
-## İşleyiş ve sınırlar
+## Kullanım ve sınırlar
 
-- Her çalıştırmadan önce kitap klasörüne `GeminiYedek_*.xlsm` (veya kitabın mevcut uzantısı) yedeği alınır. Klasör yazılabilir olmalıdır. Çalışma kitabı otomatik kaydedilmez; sonucu kontrol edip kaydedin.
-- Yalnızca mevcut makronun seçtiği gelen kutusu, son 180 günlük iletiler ve tedarikçi listesindeki **tam e-posta eşleşmeleri** işlenir. Domain/ad benzerliği tek başına yazma izni vermez. Tedarikçinin alternatif adreslerini listeye ekleyin.
-- Mevcut geçmiş-yanıt ayırıcısından çıkan yanıt metni, alınma tarihi ve yalnızca ilgili tedarikçinin aday satır/sipariş/kalem/malzeme kodları Google Gemini API'ye gönderilir. İş verilerinizin Google'a iletilmesini bu kullanım gerektirir. Ek dosyalar Gemini'ye gönderilmez; mevcut ek kaydetme davranışı korunur.
-- Gemini sonucu JSON şemasına, aday satır listesine, yanıt içindeki gerçek alıntıya, benzersiz sipariş+kalem/malzeme eşleşmesine, tarih ve durum doğrulamasına tabidir. Model güven puanı tek başına doğruluk garantisi değildir. Kod eşleştirmeleri kasıtlı olarak sıkıdır; farklı sıfır dolguları gibi biçimler inceleme gerektirebilir.
-- Belirsiz yanıtlar `Log` sayfasında `GEMINI_BELIRSIZ`, tam adresi bilinmeyen gönderenler `GEMINI_GONDEREN_BELIRSIZ` olarak bırakılır. Genel “hepsi haftaya” gibi yanıtlar bütün siparişlere yayılmaz. Tek sayfada en fazla 500 aday satır desteklenir.
-- Bir satırın kayıtlı yanıt tarihi işlenen mailden yeni veya eşitse eski mail o satırı ezmez. Aynı anda çok sayıda mailde API çağrıları sıralı çalışır; Excel bekleyebilir ve API kullanım ücreti oluşabilir.
-- API/JSON hatasında eski hatalı eşleştirmeye dönülmez; çalışma hata bildirerek durur. Önceki başarılı satırlar kitapta kalabilir; yedek geri dönüş içindir. Önceki `IslenenMailler` kayıtları korunur. Eski mailleri yeniden incelemek için önce kitap kopyasında ilgili kayıtları/yanıt tarihlerini değerlendirin; körlemesine temizlemeyin.
-- Eski yanıt ayırma kuralı ve Gemini yanılabilir. Gerçek örneklerle doğrulama gereklidir. Kalıcı öğrenme veya tüm bilgisayarı yöneten bir ajan değildir; Excel/Outlook erişimini VBA gerçekleştirir, Gemini yalnızca metin yorumlar. Yanıtlar otomatik gönderilmez.
+- Günlük kullanım: tabloyu doldur, Outlook'u aç, **GelenYanitlariOku** makrosunu başlat. Mail oluşturma modülünüzü aynı şekilde kullanmaya devam edin.
+- `Ayarlar` sayfasındaki sipariş sayfaları, tedarikçi sayfası, sütunlar ve gelen kutusu yolu doğru olmalı. Birden fazla sipariş sayfası aynı sütun düzenini kullanmalıdır. Tam yol gerekiyorsa `Posta Kutusu\Gelen Kutusu\Alt Klasör` biçimini kullanın.
+- Yalnızca seçili gelen kutusu klasörü ve son 180 gün taranır; alt klasörler kendiliğinden taranmaz. Yeni Outlook ve Excel Web, VBA/Outlook COM akışını desteklemez.
+- Belirsiz eşleşmeleri `Log` sayfasındaki **BELIRSIZ_YANIT / ESLESMEDI / BELIRSIZ_GONDEREN** kayıtlarında inceleyin. Belirsiz veya yanlış kaydedilmiş siparişleri tahmin ederek doldurmaz.
+- Önceden işlenmiş mailler `IslenenMailler` sayfasında tutulur ve atlanır. Bu güncelleme geçmişte yanlış yazılmış satırları otomatik temizlemez. Yeniden deneme gerekiyorsa önce kitap kopyasında ilgili eski yanıt/tarihleri ve işlenmiş mail kayıtlarını inceleyin. `IslenenMailleriTemizle` bütün kayıtları temizler; asıl kitapta körlemesine çalıştırmayın.
+- Makro sonuçları hücrelere yazar; otomatik mail göndermez. Mevcut ek kaydetme ve raporlama akışı korunmuştur. Sonuçları kontrol edip Excel'i kendiniz kaydedin.
 
-## Doğrulama
+## Kontrol durumu
 
-`python -m unittest discover -s tests -v`: aday/kalem ayrımı, belirsizlik, uydurma alıntı, geçersiz tarih/durum, tekrar eden satır, eksik anahtar, HTTP istek yapısı ve eksik model çıktısı için 15 test.
-
-Bulut Linux ortamında bu testler geçti. Gerçek Gemini çağrısı ve Windows Excel/Outlook COM, VBA derlemesi ve gerçek çalışma kitabıyla uçtan uca test **bu ortamda yapılmadı**. Paylaşılan anahtar kullanılmadı veya depoya eklenmedi. `Kurulum.ps1` Windows'ta canlı Gemini testini çalıştırır; gerçek posta/Excel doğrulaması yukarıdaki kopya kitap adımında tamamlanmalıdır.
+Linux ortamında kaynak yapısı, prosedür adları/sınırları, VBA satır uzunlukları, değişen kodun kapsamı ve mail oluşturma dosyasının özgün dosyayla bayt eşitliği kontrol edildi. Windows için modüle **23 kontrol içeren `MailOkumaOzTest`** eklendi. **Bu kontroller burada çalıştırılmadı; Excel/VBA derlemesi ve gerçek Outlook uçtan uca testi de burada yapılamadı.** Çalışan Windows testi sonucu alınmadan makronun sorununuzu kesin çözdüğü iddia edilmez.
