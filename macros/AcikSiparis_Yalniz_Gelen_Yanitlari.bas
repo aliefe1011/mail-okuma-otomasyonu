@@ -3,7 +3,7 @@ Option Explicit
 
 '============================================================
 '  ACIK SIPARIS MAIL OTOMASYONU - GELEN YANITLARI OKU
-'  Surum: 6.3 (Son yanit, ozet ve mevcut satiri guncelleme)
+'  Surum: 6.4 (Acik eslesmeme nedenleri ve dogru sayaclar)
 '============================================================
 
 Private Const TEST_MODE As Boolean = False
@@ -52,6 +52,8 @@ Private gProcessedDict As Object
 Private gInternalDomains As Object
 Private gSiparisYokCount As Long
 Private gBelirsizCount As Long
+Private gMailHasVendorRows As Boolean
+Private gMailMatchedRows As Long
 
 Private gOrigScreenUpdating As Boolean
 Private gOrigEnableEvents As Boolean
@@ -776,6 +778,7 @@ Private Sub DoReadReplies(ByRef cfg As Object)
     Dim senderDomain As String, vendorName As String, matchMethod As String
     Dim newReply As String, attachmentList As String
     Dim sheetUpdated As Long, upd As Long
+    Dim updatedMailCount As Long, unknownVendorCount As Long
     Dim tMode As Boolean: tMode = IsTestMode()
 
     If tMode Then
@@ -793,6 +796,8 @@ Private Sub DoReadReplies(ByRef cfg As Object)
         " | VendorMail=" & NumToColLetter(vendorEmailCol) & _
         " | Siparis=" & NumToColLetter(cfg("OrderNoCol")) & _
         " | Malzeme=" & NumToColLetter(cfg("MalzemeCol")) & _
+        " | Kalem=" & NumToColLetter(cfg("KalemNoCol")) & _
+        " | SiparisTedarikci=" & NumToColLetter(cfg("VendorCol")) & _
         " | Yanit=" & NumToColLetter(cfg("ReplyCol")) & _
         " | Yanitlayan=" & NumToColLetter(cfg("ReplyFromCol")) & _
         " | Eslesme=" & NumToColLetter(cfg("MatchMethodCol")) & _
@@ -836,6 +841,15 @@ Private Sub DoReadReplies(ByRef cfg As Object)
     WriteLog "TEDARIKCI_YUKLE", "", "", "", "Yuklenen tedarikci: " & loadedCount & _
              " / toplam satir: " & (vLastRow - 1)
 
+    Dim checkSheet As Worksheet
+    For i = 1 To orderSheets.Count
+        Set checkSheet = orderSheets(i)
+        WriteLog "SUTUN_KONTROL", checkSheet.Name, "", "", _
+            "Siparis=" & NumToColLetter(CLng(cfg("OrderNoCol"))) & ":" & SafeStr(checkSheet.Cells(HEADER_ROW, CLng(cfg("OrderNoCol"))).Value) & _
+            " | Kalem=" & NumToColLetter(CLng(cfg("KalemNoCol"))) & ":" & SafeStr(checkSheet.Cells(HEADER_ROW, CLng(cfg("KalemNoCol"))).Value), _
+            "Tedarikci=" & NumToColLetter(CLng(cfg("VendorCol"))) & ":" & SafeStr(checkSheet.Cells(HEADER_ROW, CLng(cfg("VendorCol"))).Value) & _
+            " | Durum=" & NumToColLetter(CLng(cfg("DurumCol")))
+    Next i
     Set olApp = GetOutlookApp()
     If olApp Is Nothing Then
         AppStateEnd
@@ -853,6 +867,7 @@ Private Sub DoReadReplies(ByRef cfg As Object)
     Set gInternalDomains = LoadInternalDomains(cfg, olNs)
     EnsureTerminReportSheet
     cutoffDate = DateAdd("d", -MAX_LOOKBACK_DAYS, Now)
+    WriteLog "SURUM", "", "", "", "6.4 - neden kodlari ve mail/satir sayaclari"
     WriteLog "BASLAT", "", "", "", "GelenYanitlariOku", _
              "Inbox: " & inbox.Name & " | Toplam: " & inbox.Items.Count
 
@@ -894,6 +909,7 @@ Private Sub DoReadReplies(ByRef cfg As Object)
         If Len(senderEmail) > 0 And vendorByEmail.Exists(senderEmail) Then
             If vendorByEmail(senderEmail) = "***CAKISMA***" Then
                 WriteLog "BELIRSIZ_GONDEREN", "", "", senderEmail, "Ayni e-posta birden fazla tedarikciye kayitli."
+                unknownVendorCount = unknownVendorCount + 1: skipCount = skipCount + 1
                 GoTo NextMail
             End If
             vendorName = vendorByEmail(senderEmail): matchMethod = "e-posta"
@@ -933,16 +949,25 @@ Private Sub DoReadReplies(ByRef cfg As Object)
             End If
             attachmentList = SaveAttachments(mail, vendorName)
             sheetUpdated = 0
+            gMailHasVendorRows = False: gMailMatchedRows = 0
             For i = 1 To orderSheets.Count
                 upd = WriteReplyToSheet(cfg, orderSheets(i), vendorName, newReply, _
                     mailDate, senderEmail, matchMethod, attachmentList, tMode, mailSubject)
                 sheetUpdated = sheetUpdated + upd
             Next i
+            If sheetUpdated > 0 Then
+                updatedMailCount = updatedMailCount + 1
+            ElseIf Not gMailHasVendorRows Then
+                gSiparisYokCount = gSiparisYokCount + 1
+            ElseIf gMailMatchedRows = 0 Then
+                gBelirsizCount = gBelirsizCount + 1
+            End If
             matchCount = matchCount + sheetUpdated
             If sheetUpdated > 0 And Len(entryId) > 0 And Not tMode Then MarkMailProcessed entryId, vendorName
             WriteLog "YANIT", "", vendorName, senderEmail, matchMethod, _
                      "Konu: " & Left$(mailSubject, 80) & " | Guncellenen: " & sheetUpdated
         Else
+            unknownVendorCount = unknownVendorCount + 1: skipCount = skipCount + 1
             If IsSiparisKonusu(mailSubject) Then
                 WriteLog "ESLESMEDI", "", senderName, senderEmail, _
                          "Konu: " & Left$(mailSubject, 80), "Tedarikci bulunamadi"
@@ -953,21 +978,24 @@ NextMail:
 
     WriteLog "BITIR", "", "", "", "GelenYanitlariOku", _
              "Tekrar konu: " & duplicateSkipCount & ", Otomatik yanit: " & filteredSkipCount & _
-             " | Taranan: " & scanCount & ", Islenen: " & replyCount & _
-             ", Guncellenen: " & matchCount & ", Atlanan: " & skipCount
+             " | Taranan: " & scanCount & ", TedarikcisiTaninmisYanit: " & replyCount & _
+             ", SatirYazanMail: " & updatedMailCount & ", SatirYazmayanMail: " & (replyCount - updatedMailCount) & _
+             ", GuncellenenSatir: " & matchCount & ", AtlananMail: " & skipCount & ", TedarikciBulunamadi: " & unknownVendorCount
     If gSiparisYokCount > 0 Then
-        WriteLog "OZET", "", "", "", "SIPARIS_YOK (acik siparisi olmayan tedarikci sayisi): " & gSiparisYokCount
+        WriteLog "OZET", "", "", "", "TEDARIKCI_SATIRI_YOK (mail sayisi): " & gSiparisYokCount
     End If
     If gBelirsizCount > 0 Then
         WriteLog "OZET", "", "", "", "BELIRSIZ (e~sle~smeyen): " & gBelirsizCount
     End If
 
-    WriteTerminReport cfg, scanCount, replyCount, matchCount
+    WriteTerminReport cfg, scanCount, replyCount, matchCount, updatedMailCount
     AppStateEnd
 
     MsgBox T("Okuma tamamland~i.") & vbCrLf & vbCrLf & _
            T("Taranan mail: ") & scanCount & vbCrLf & _
-           T("E~sle~stirilen yan~it: ") & replyCount & vbCrLf & _
+           "Tedarikcisi taninan tekil yanit: " & replyCount & vbCrLf & _
+           "Satir guncelleyen yanit: " & updatedMailCount & vbCrLf & _
+           "Satir guncellemeyen yanit: " & (replyCount - updatedMailCount) & vbCrLf & _
            T("Excel'de g~uncellenen sat~ir: ") & matchCount & vbCrLf & _
            T("Belirsiz (e~sle~smeyen): ") & gBelirsizCount & vbCrLf & _
            T("Atlanan (i~slenmi~s): ") & processedSkipCount & vbCrLf & _
@@ -975,7 +1003,7 @@ NextMail:
            "Atlanan (otomatik yanit): " & filteredSkipCount & vbCrLf & _
            T("Atlanan (tarih): ") & dateSkipCount & vbCrLf & _
            T("Atlanan (dahili): ") & internalSkipCount & vbCrLf & _
-           T("A~c~ik sipari~si olmayan tedarik~ci: ") & gSiparisYokCount, _
+           "Tabloda tedarikci satiri bulunamayan yanit: " & gSiparisYokCount, _
            vbInformation, AppTitle()
 End Sub
 
@@ -984,12 +1012,11 @@ Private Function WriteReplyToSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
     ByVal senderEmail As String, ByVal matchMethod As String, ByVal attachmentList As String, _
     ByVal tMode As Boolean, Optional ByVal mailSubject As String = "") As Long
     Dim matches As Object, key As Variant, r As Long, n As Long
-    Dim replyText As String
-    Set matches = SelectReplyRows(cfg, ws, vendorName, newReply, mailSubject)
+    Dim replyText As String, reason As String
+    Set matches = SelectReplyRows(cfg, ws, vendorName, newReply, mailSubject, reason)
+    gMailMatchedRows = gMailMatchedRows + matches.Count
     If matches.Count = 0 Then
-        gBelirsizCount = gBelirsizCount + 1
-        WriteLog "BELIRSIZ_YANIT", ws.Name, vendorName, senderEmail, _
-            "Tedarikci/siparis/kalem kesin eslesmedi; hicbir satir degistirilmedi."
+        WriteLog "ESLESME_NEDENI", ws.Name, vendorName, senderEmail, reason, "Konu: " & Left$(mailSubject, 160)
         Exit Function
     End If
     For Each key In matches.Keys
@@ -997,10 +1024,20 @@ Private Function WriteReplyToSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
         If tMode And n >= TEST_MAX_ORDERS Then Exit For
         ' Inbox order is not chronological. Never let an older reply overwrite a newer one.
         If IsDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) Then
-            If CDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) >= mailDate Then GoTo NextMatch
+            If CDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) >= mailDate Then
+                If ws.Parent Is ThisWorkbook Then
+                    WriteLog "ESKI_VEYA_AYNI_TARIH", ws.Name, vendorName, senderEmail, "Satir=" & r, _
+                        "Kayitli=" & Format$(CDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value), "yyyy-mm-dd hh:nn:ss") & _
+                        " | Mail=" & Format$(mailDate, "yyyy-mm-dd hh:nn:ss")
+                End If
+                GoTo NextMatch
+            End If
         End If
         replyText = CStr(matches(key))
-        If Len(SummarizeReply(replyText)) = 0 Then GoTo NextMatch
+        If Len(SummarizeReply(replyText)) = 0 Then
+            If ws.Parent Is ThisWorkbook Then WriteLog "OZET_BOS", ws.Name, vendorName, senderEmail, "Satir=" & r
+            GoTo NextMatch
+        End If
         WriteReplyToRow ws, r, replyText, mailDate, senderEmail, matchMethod & " / kalem-dogrulandi", _
             attachmentList, CLng(cfg("ReplyCol")), CLng(cfg("ReplyDateCol")), _
             CLng(cfg("ReplyFromCol")), CLng(cfg("MatchMethodCol")), CLng(cfg("AttachCol")), _
@@ -1012,13 +1049,15 @@ NextMatch:
 End Function
 
 Private Function SelectReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
-    ByVal vendorName As String, ByVal reply As String, ByVal subject As String) As Object
+    ByVal vendorName As String, ByVal reply As String, ByVal subject As String, _
+    Optional ByRef reason As String = "") As Object
     Dim result As Object, vendorRows As Collection, allOrders As Object
     Dim r As Long, lastRow As Long, key As Variant, rowKey As Variant
     Dim lines As Variant, oneLine As Variant, line As String, activeRow As String
     Dim hits As Collection, orderNo As String, itemNo As String, material As String
     Dim lineHasOrder As Boolean, subjectHasOrder As Boolean, lineHasItem As Boolean
     Dim orderContext As String, processedReply As String
+    Dim subjectRows As Long, subjectCodes As Object
     Dim orderOK As Boolean, itemOK As Boolean, materialOK As Boolean
     Dim hasAnyIdentifier As Boolean, ambiguous As Boolean, vendorCount As Long
     Dim hasLineMaterial As Boolean, score As Long, bestScore As Long
@@ -1035,7 +1074,16 @@ Private Function SelectReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
         End If
     Next r
     vendorCount = vendorRows.Count
-    If vendorCount = 0 Then Set SelectReplyRows = result: Exit Function
+    If vendorCount = 0 Then
+        reason = "TEDARIKCI_SATIRI_YOK | TedarikciSutunu=" & NumToColLetter(CLng(cfg("VendorCol"))) & _
+            " | SiparisSutunu=" & NumToColLetter(CLng(cfg("OrderNoCol"))) & " | SonSatir=" & lastRow
+        Set SelectReplyRows = result: Exit Function
+    End If
+    gMailHasVendorRows = True
+    Set subjectCodes = ExtractNumbers(subject)
+    For Each rowKey In vendorRows
+        If ContainsCode(subject, SafeStr(ws.Cells(CLng(rowKey), CLng(cfg("OrderNoCol"))).Value)) Then subjectRows = subjectRows + 1
+    Next rowKey
     orderContext = subject
     subjectHasOrder = HasKnownOrder(subject, allOrders) Or HasOrderLabel(subject)
     lines = Split(Replace(Replace(reply, vbCrLf, vbLf), vbCr, vbLf), vbLf)
@@ -1116,6 +1164,19 @@ NextLine:
             result.Add CStr(vendorRows(1)), processedReply
         End If
     End If
+    If result.Count > 0 Then
+        reason = "ESLESTI"
+    ElseIf subjectCodes.Count > 0 And subjectRows = 0 Then
+        reason = "KONU_SIPARISI_TEDARIKCIDE_YOK"
+    ElseIf ambiguous Then
+        reason = "BIRDEN_FAZLA_KALEM_ADAYI"
+    ElseIf Not hasAnyIdentifier And Not subjectHasOrder Then
+        reason = "YANITTA_SIPARIS_KALEM_MALZEME_YOK"
+    Else
+        reason = "KOD_VEYA_KALEM_ESLESMEDI"
+    End If
+    reason = reason & " | TedarikciSatiri=" & vendorCount & " | KonuKodSayisi=" & subjectCodes.Count & _
+        " | KonuSiparisSatiri=" & subjectRows & " | SonucSatiri=" & result.Count
     Set SelectReplyRows = result
 End Function
 
@@ -1413,7 +1474,7 @@ Private Sub EnsureTerminReportSheet()
 End Sub
 
 Private Sub WriteTerminReport(ByRef cfg As Object, ByVal scanned As Long, _
-                               ByVal replied As Long, ByVal updated As Long)
+                               ByVal replied As Long, ByVal updated As Long, Optional ByVal updatedMails As Long = 0)
     On Error Resume Next
     EnsureTerminReportSheet
     If gTermReportWs Is Nothing Then Exit Sub
@@ -1426,7 +1487,10 @@ Private Sub WriteTerminReport(ByRef cfg As Object, ByVal scanned As Long, _
     gTermReportWs.Cells(r, 1).Value = T("OZET"): gTermReportWs.Cells(r, 1).Font.Bold = True
     r = r + 1
     gTermReportWs.Cells(r, 1).Value = T("Taranan mail"): gTermReportWs.Cells(r, 2).Value = scanned: r = r + 1
-    gTermReportWs.Cells(r, 1).Value = T("E~sle~stirilen yan~it"): gTermReportWs.Cells(r, 2).Value = replied: r = r + 1
+    gTermReportWs.Cells(r, 1).Value = "Tedarikcisi taninan tekil yanit": gTermReportWs.Cells(r, 2).Value = replied: r = r + 1
+    gTermReportWs.Cells(r, 1).Value = "Satir guncelleyen yanit": gTermReportWs.Cells(r, 2).Value = updatedMails: r = r + 1
+    gTermReportWs.Cells(r, 1).Value = "Satir guncellemeyen yanit": gTermReportWs.Cells(r, 2).Value = replied - updatedMails: r = r + 1
+    gTermReportWs.Cells(r, 1).Value = "Tabloda tedarikci satiri olmayan yanit": gTermReportWs.Cells(r, 2).Value = gSiparisYokCount: r = r + 1
     gTermReportWs.Cells(r, 1).Value = T("G~uncellenen sat~ir"): gTermReportWs.Cells(r, 2).Value = updated: r = r + 1
     gTermReportWs.Cells(r, 1).Value = T("Belirsiz (e~sle~smeyen)"): gTermReportWs.Cells(r, 2).Value = gBelirsizCount: r = r + 2
     Dim statusCounts As Object: Set statusCounts = CreateObject("Scripting.Dictionary")
@@ -2088,7 +2152,7 @@ End Function
 ' Run manually in Excel: no Outlook, no API, temporary workbook only.
 Public Sub MailOkumaOzTest()
     Dim wb As Workbook, ws As Worksheet, cfg As Object, got As Object
-    Dim passed As Long, errText As String, n As Long
+    Dim passed As Long, errText As String, n As Long, reason As String
     On Error GoTo Failed
     Set wb = Workbooks.Add(xlWBATWorksheet)
     Set ws = wb.Worksheets(1)
@@ -2172,6 +2236,14 @@ Public Sub MailOkumaOzTest()
     ReplyAssert IsEmpty(ParseTurkishDate("31.02.2026", DateSerial(2026, 11, 4))), "Gecersiz tarih baska aya kaymamali", passed
     ReplyAssert IsEmpty(ParseTurkishDate("2026-02-30", DateSerial(2026, 11, 4))), "Gecersiz ISO tarih yeniden yorumlanmamali", passed
     ReplyAssert ParseTurkishDate("12 kasim 2027", DateSerial(2026, 11, 4)) = DateSerial(2027, 11, 12), "Yazili ayda acik yil korunmali", passed
+    Set got = SelectReplyRows(cfg, ws, "YOK", "yarin teslim", "", reason)
+    ReplyAssert InStr(reason, "TEDARIKCI_SATIRI_YOK") = 1, "Tedarikci satiri yok nedeni ayri olmali", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "yarin teslim", "Siparis 4999999999", reason)
+    ReplyAssert InStr(reason, "KONU_SIPARISI_TEDARIKCIDE_YOK") = 1, "Siparis yok nedeni ayri olmali", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "4500000001 yarin teslim", "", reason)
+    ReplyAssert InStr(reason, "BIRDEN_FAZLA_KALEM_ADAYI") = 1, "Kalem belirsizligi ayri olmali", passed
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "yarin teslim", "Acik siparisler hakkinda", reason)
+    ReplyAssert InStr(reason, "YANITTA_SIPARIS_KALEM_MALZEME_YOK") = 1, "Genel yanit nedeni ayri olmali", passed
     wb.Close SaveChanges:=False
     MsgBox passed & " kontrol gecti. Outlook'a baglanilmadi; asil kitap degistirilmedi.", vbInformation
     Exit Sub

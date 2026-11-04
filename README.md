@@ -1,4 +1,4 @@
-# Outlook gelen yanıtlarını Excel'e okuma — VBA 6.3
+# Outlook gelen yanıtlarını Excel'e okuma — VBA 6.4
 
 **Python, PowerShell, Gemini veya API anahtarı gerekmez.** Çalışan mail oluşturma modülüne dokunulmadı. Bu sürüm, yanıtların yanlış sipariş/kalem satırına yazılmasını hedefler.
 
@@ -8,8 +8,16 @@
 2. `macros/AcikSiparis_Yalniz_Gelen_Yanitlari.bas` dosyasını indirin. GitHub dosya sayfasında **Download raw file** düğmesini kullanın; web sayfasını `.bas` diye kaydetmeyin.
 3. Excel'de `Alt+F11`. Soldaki proje ağacından **OnlyReadReplies** modülüne sağ tıklayın; eski modülü dışa aktararak yedekleyin ve kaldırın. Diğer modüllere, özellikle mail oluşturma modülüne dokunmayın.
 4. `File > Import File` ile yeni `.bas` dosyasını ekleyin. `Debug > Compile VBAProject` çalıştırın. Türkçe VBA dışa aktarma kodlaması Windows-1254 korunur; Türkçe olmayan Windows'ta karakterleri ayrıca kontrol edin.
-5. `Alt+F8` → **MailOkumaOzTest** → Çalıştır. Bu kontrol geçici bir kitap açar, örnek satırlarda eşleştirme ve gerçek hücre yazma kontrolleri yapar, kitabı kaydetmeden kapatır. Outlook'a bağlanmaz, gerçek sipariş verisini değiştirmez. Başarılıysa **43 kontrol gecti** mesajı beklenir.
+5. `Alt+F8` → **MailOkumaOzTest** → Çalıştır. Bu kontrol geçici bir kitap açar, örnek satırlarda eşleştirme ve gerçek hücre yazma kontrolleri yapar, kitabı kaydetmeden kapatır. Outlook'a bağlanmaz, gerçek sipariş verisini değiştirmez. Başarılıysa **47 kontrol gecti** mesajı beklenir.
 6. Outlook açıkken `Alt+F8` → **GelenYanitlariOku** → Çalıştır. Kayıtlı `Ayarlar` sayfasını kontrol edip devam edin. Sonucu kopya kitapta doğruladıktan sonra asıl kitaba aynı modülü aktarın.
+
+## Doğru sayaçlar ve eşleşmeme nedenleri
+
+6.4 sürümünde “tedarikçisi tanınan yanıt”, “satır güncelleyen yanıt” ve “güncellenen satır” ayrı gösterilir. Belirsizlik ve tabloda tedarikçi bulunamaması mail başına sayılır; birden fazla sayfa aynı maili çoğaltmaz. Tedarikçisi bulunamayan mailler de atlanan toplamına dahildir.
+
+`Log` sayfasında `SURUM=6.4`, `SUTUN_KONTROL` ve `ESLESME_NEDENI` kayıtları bulunur. Nedenler: `TEDARIKCI_SATIRI_YOK`, `KONU_SIPARISI_TEDARIKCIDE_YOK`, `BIRDEN_FAZLA_KALEM_ADAYI`, `YANITTA_SIPARIS_KALEM_MALZEME_YOK`, `KOD_VEYA_KALEM_ESLESMEDI`. Sayısal aday sayıları ve kullanılan sütunlar da yazılır. Daha yeni/eşit kayıt yüzünden yazılmayan satırlar `ESKI_VEYA_AYNI_TARIH`, özeti boş kalanlar `OZET_BOS` olarak ayrılır.
+
+Bu değişiklik gözlenemeyen mail içerikleri için eşleşme tahmin etmez ve eşleştirme kurallarını gevşetmez. Loglar tek başına gerçek mail gövdesinin ve Excel satırının yerini tutmaz. Güncelleme geçmişte yanlış yazılmış hücreleri kendiliğinden onarmaz.
 
 ## Son yanıt, özet ve güncelleme
 
@@ -42,4 +50,4 @@
 
 ## Kontrol durumu
 
-Linux ortamında kaynak yapısı, prosedür adları/sınırları, VBA satır uzunlukları, değişen kodun kapsamı ve mail oluşturma dosyasının özgün dosyayla bayt eşitliği kontrol edildi. Windows için modüle **43 kontrol içeren `MailOkumaOzTest`** eklendi. **Bu kontroller burada çalıştırılmadı; Excel/VBA derlemesi ve gerçek Outlook uçtan uca testi de burada yapılamadı.** Çalışan Windows testi sonucu alınmadan makronun sorununuzu kesin çözdüğü iddia edilmez.
+Linux ortamında kaynak yapısı, prosedür adları/sınırları, VBA satır uzunlukları, değişen kodun kapsamı ve mail oluşturma dosyasının özgün dosyayla bayt eşitliği kontrol edildi. Windows için modüle **47 kontrol içeren `MailOkumaOzTest`** eklendi. **Bu kontroller burada çalıştırılmadı; Excel/VBA derlemesi ve gerçek Outlook uçtan uca testi de burada yapılamadı.** Çalışan Windows testi sonucu alınmadan makronun sorununuzu kesin çözdüğü iddia edilmez.
