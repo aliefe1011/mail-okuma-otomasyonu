@@ -3,7 +3,7 @@ Option Explicit
 
 '============================================================
 '  ACIK SIPARIS MAIL OTOMASYONU - GELEN YANITLARI OKU
-'  Surum: 6.4 (Acik eslesmeme nedenleri ve dogru sayaclar)
+'  Surum: 6.5 (Alinti baglami, aciklama ve alt klasor taramasi)
 '============================================================
 
 Private Const TEST_MODE As Boolean = False
@@ -54,6 +54,7 @@ Private gSiparisYokCount As Long
 Private gBelirsizCount As Long
 Private gMailHasVendorRows As Boolean
 Private gMailMatchedRows As Long
+Private gDeepFolders As Boolean
 
 Private gOrigScreenUpdating As Boolean
 Private gOrigEnableEvents As Boolean
@@ -322,6 +323,12 @@ Public Sub IslenenMailleriTemizle()
     MsgBox T("Islenen mailler listesi temizlendi. Tum mailler yeniden islenecek."), vbInformation, AppTitle()
 End Sub
 
+Public Sub GelenYanitlariDerinOku()
+    gDeepFolders = True
+    GelenYanitlariOku
+    gDeepFolders = False
+End Sub
+
 Public Sub GelenYanitlariOku()
     Dim cfg As Object
     Set gProcessedDict = Nothing
@@ -333,11 +340,13 @@ Public Sub GelenYanitlariOku()
     On Error GoTo FatalError
     Set cfg = GetConfig()
     cfg.RemoveAll
-    If Not LoadOrCollectSettings(cfg) Then Exit Sub
-    If Not ValidateSchema(cfg) Then Exit Sub
+    If Not LoadOrCollectSettings(cfg) Then gDeepFolders = False: Exit Sub
+    If Not ValidateSchema(cfg) Then gDeepFolders = False: Exit Sub
     DoReadReplies cfg
+    gDeepFolders = False
     Exit Sub
 FatalError:
+    gDeepFolders = False
     AppStateEnd
     MsgBox T("Kritik Hata (Satir ") & Erl & "):" & vbCrLf & Err.Description & vbCrLf & vbCrLf & _
            T("Lutfen Excel sayfalarini ve sutun basliklarini kontrol edin."), vbCritical, AppTitle()
@@ -867,14 +876,19 @@ Private Sub DoReadReplies(ByRef cfg As Object)
     Set gInternalDomains = LoadInternalDomains(cfg, olNs)
     EnsureTerminReportSheet
     cutoffDate = DateAdd("d", -MAX_LOOKBACK_DAYS, Now)
-    WriteLog "SURUM", "", "", "", "6.4 - neden kodlari ve mail/satir sayaclari"
+    WriteLog "SURUM", "", "", "", "6.5 - derin baglam ve alt klasor taramasi"
     WriteLog "BASLAT", "", "", "", "GelenYanitlariOku", _
              "Inbox: " & inbox.Name & " | Toplam: " & inbox.Items.Count
 
     Dim sortedItems As Object, seenTopics As Object, topicKey As String
+    Dim quotedContext As String
     Dim duplicateSkipCount As Long, filteredSkipCount As Long
-    Set sortedItems = inbox.Items
-    sortedItems.Sort "[ReceivedTime]", True
+    If gDeepFolders Then
+        Set sortedItems = CollectDeepMails(inbox)
+    Else
+        Set sortedItems = inbox.Items
+        sortedItems.Sort "[ReceivedTime]", True
+    End If
     Set seenTopics = CreateObject("Scripting.Dictionary")
     seenTopics.CompareMode = vbTextCompare
     For Each mail In sortedItems
@@ -927,7 +941,7 @@ Private Sub DoReadReplies(ByRef cfg As Object)
                 filteredSkipCount = filteredSkipCount + 1: skipCount = skipCount + 1
                 GoTo NextMail
             End If
-            topicKey = ReplyTopicKey(vendorName, mailSubject, entryId)
+            topicKey = ReplyTopicKey(vendorName, mailSubject, entryId, SafeConversationId(mail))
             If seenTopics.Exists(topicKey) Then
                 duplicateSkipCount = duplicateSkipCount + 1: skipCount = skipCount + 1
                 GoTo NextMail
@@ -943,6 +957,7 @@ Private Sub DoReadReplies(ByRef cfg As Object)
             End If
             replyCount = replyCount + 1
             newReply = ExtractNewReply(mailBody)
+            quotedContext = FirstQuotedMessage(mailBody)
             If Len(Trim$(newReply)) = 0 Then
                 WriteLog "BOS_YANIT", "", vendorName, senderEmail, "Yeni yanit bos; satir degistirilmedi."
                 GoTo NextMail
@@ -952,7 +967,7 @@ Private Sub DoReadReplies(ByRef cfg As Object)
             gMailHasVendorRows = False: gMailMatchedRows = 0
             For i = 1 To orderSheets.Count
                 upd = WriteReplyToSheet(cfg, orderSheets(i), vendorName, newReply, _
-                    mailDate, senderEmail, matchMethod, attachmentList, tMode, mailSubject)
+                    mailDate, senderEmail, matchMethod, attachmentList, tMode, mailSubject, quotedContext)
                 sheetUpdated = sheetUpdated + upd
             Next i
             If sheetUpdated > 0 Then
@@ -1010,10 +1025,11 @@ End Sub
 Private Function WriteReplyToSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
     ByVal vendorName As String, ByVal newReply As String, ByVal mailDate As Date, _
     ByVal senderEmail As String, ByVal matchMethod As String, ByVal attachmentList As String, _
-    ByVal tMode As Boolean, Optional ByVal mailSubject As String = "") As Long
+    ByVal tMode As Boolean, Optional ByVal mailSubject As String = "", _
+    Optional ByVal quotedContext As String = "") As Long
     Dim matches As Object, key As Variant, r As Long, n As Long
-    Dim replyText As String, reason As String
-    Set matches = SelectReplyRows(cfg, ws, vendorName, newReply, mailSubject, reason)
+    Dim replyText As String, reason As String, reasonParts As Variant
+    Set matches = SelectDeepReplyRows(cfg, ws, vendorName, newReply, mailSubject, quotedContext, reason)
     gMailMatchedRows = gMailMatchedRows + matches.Count
     If matches.Count = 0 Then
         WriteLog "ESLESME_NEDENI", ws.Name, vendorName, senderEmail, reason, "Konu: " & Left$(mailSubject, 160)
@@ -1038,7 +1054,8 @@ Private Function WriteReplyToSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
             If ws.Parent Is ThisWorkbook Then WriteLog "OZET_BOS", ws.Name, vendorName, senderEmail, "Satir=" & r
             GoTo NextMatch
         End If
-        WriteReplyToRow ws, r, replyText, mailDate, senderEmail, matchMethod & " / kalem-dogrulandi", _
+        reasonParts = Split(reason, " | ")
+        WriteReplyToRow ws, r, replyText, mailDate, senderEmail, matchMethod & " / " & CStr(reasonParts(0)), _
             attachmentList, CLng(cfg("ReplyCol")), CLng(cfg("ReplyDateCol")), _
             CLng(cfg("ReplyFromCol")), CLng(cfg("MatchMethodCol")), CLng(cfg("AttachCol")), _
             CLng(cfg("DurumCol")), CLng(cfg("TerminCol")), CLng(cfg("StatusCol")), ""
@@ -1055,6 +1072,7 @@ Private Function SelectReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
     Dim r As Long, lastRow As Long, key As Variant, rowKey As Variant
     Dim lines As Variant, oneLine As Variant, line As String, activeRow As String
     Dim hits As Collection, orderNo As String, itemNo As String, material As String
+    Dim description As String, descriptionOK As Boolean
     Dim lineHasOrder As Boolean, subjectHasOrder As Boolean, lineHasItem As Boolean
     Dim orderContext As String, processedReply As String
     Dim subjectRows As Long, subjectCodes As Object
@@ -1107,15 +1125,22 @@ Private Function SelectReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
             orderNo = SafeStr(ws.Cells(r, CLng(cfg("OrderNoCol"))).Value)
             itemNo = SafeStr(ws.Cells(r, CLng(cfg("KalemNoCol"))).Value)
             material = SafeStr(ws.Cells(r, CLng(cfg("MalzemeCol"))).Value)
-            orderOK = False: itemOK = False: materialOK = False
+            orderOK = False: itemOK = False: materialOK = False: descriptionOK = False
+            If cfg.Exists("UzunMetinCol") Then
+                If CLng(cfg("UzunMetinCol")) > 0 Then
+                    description = NormalizeName(SafeStr(ws.Cells(r, CLng(cfg("UzunMetinCol"))).Value))
+                    If Len(description) >= 20 And InStr(description, " ") > 0 Then _
+                        descriptionOK = (InStr(" " & NormalizeName(line) & " ", " " & description & " ") > 0)
+                End If
+            End If
             If lineHasOrder Then
                 orderOK = ContainsCode(line, orderNo)
             ElseIf subjectHasOrder Then
                 orderOK = ContainsCode(orderContext, orderNo)
             End If
             If Len(Trim$(material)) >= 5 Then materialOK = ContainsCode(line, material)
-            If materialOK Then hasAnyIdentifier = True: hasLineMaterial = True
-            itemOK = ContainsItem(line, itemNo)
+            If materialOK Or descriptionOK Then hasAnyIdentifier = True: hasLineMaterial = True
+            itemOK = ContainsItem(line, itemNo, orderNo)
             ' An explicit order in the line takes priority over the mail subject.
             If lineHasOrder And Not orderOK Then GoTo NextVendorRow
             If Not lineHasOrder And subjectHasOrder And Not orderOK Then GoTo NextVendorRow
@@ -1124,7 +1149,9 @@ Private Function SelectReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
             If materialOK Then
                 score = 3
             ElseIf orderOK And itemOK Then
-                score = 3
+                score = 4
+            ElseIf descriptionOK Then
+                score = 2
             ElseIf orderOK And Not lineHasItem And InStr(line, vbTab) = 0 Then
                 score = 1
             End If
@@ -1209,18 +1236,25 @@ Private Function HasItemLabel(ByVal text As String) As Boolean
     Dim re As Object
     Set re = CreateObject("VBScript.RegExp")
     re.IgnoreCase = True
-    re.Pattern = "(^|[^a-z])(kalem|item|pozisyon)(\s*no)?\s*[:#-]?\s*0*[0-9]+([^0-9]|$)"
-    HasItemLabel = re.Test(NormalizeName(text))
+    re.Pattern = "(^|[^a-z])(kalem|item|pozisyon)(\s*no)?\s*[:#-]?\s*0*[0-9]+([^0-9]|$)|" & _
+        "(^|[^0-9])[0-9]{1,5}\s*(nolu|no lu|numarali)?\s*(kalem|item|pozisyon)([^a-z]|$)"
+    HasItemLabel = re.Test(ItemSearchText(text))
 End Function
 
-Private Function ContainsItem(ByVal text As String, ByVal code As String) As Boolean
+Private Function ContainsItem(ByVal text As String, ByVal code As String, Optional ByVal orderNo As String = "") As Boolean
     Dim re As Object, parts As Variant, part As Variant, normalized As String
     normalized = NormalizeOrderNo(code)
     If Len(normalized) = 0 Then Exit Function
     Set re = CreateObject("VBScript.RegExp")
     re.IgnoreCase = True
     re.Pattern = "(^|[^a-z])(kalem|item|pozisyon)(\s*no)?\s*[:#-]?\s*0*" & EscapeRegex(normalized) & "([^0-9]|$)"
-    If re.Test(NormalizeName(text)) Then ContainsItem = True: Exit Function
+    If re.Test(ItemSearchText(text)) Then ContainsItem = True: Exit Function
+    re.Pattern = "(^|[^0-9])0*" & EscapeRegex(normalized) & "\s*(nolu|no lu|numarali)?\s*(kalem|item|pozisyon)([^a-z]|$)"
+    If re.Test(ItemSearchText(text)) Then ContainsItem = True: Exit Function
+    If Len(orderNo) > 0 Then
+        re.Pattern = "(^|[^0-9])0*" & EscapeRegex(NormalizeOrderNo(orderNo)) & "\s*[/|-]\s*0*" & EscapeRegex(normalized) & "([^0-9]|$)"
+        If re.Test(text) Then ContainsItem = True: Exit Function
+    End If
     If InStr(text, vbTab) > 0 Then
         parts = Split(text, vbTab)
         For Each part In parts
@@ -1603,6 +1637,7 @@ Private Function ExtractNewReply(ByVal body As String) As String
     re.Pattern = "^(on .+wrote:|.+tarihinde .+yazd[ýi]:|_{10,})$"
     For Each oneLine In lines
         line = Trim$(CStr(oneLine))
+        If Left$(line, 1) = ">" Then Exit For
         If InStr(line, ":") > 0 Then
             If IsReplyHeader(Left$(line, InStr(line, ":") - 1)) Then Exit For
         End If
@@ -2153,6 +2188,7 @@ End Function
 Public Sub MailOkumaOzTest()
     Dim wb As Workbook, ws As Worksheet, cfg As Object, got As Object
     Dim passed As Long, errText As String, n As Long, reason As String
+    Dim context As String, objects() As Object, times() As Date, j As Long
     On Error GoTo Failed
     Set wb = Workbooks.Add(xlWBATWorksheet)
     Set ws = wb.Worksheets(1)
@@ -2244,6 +2280,52 @@ Public Sub MailOkumaOzTest()
     ReplyAssert InStr(reason, "BIRDEN_FAZLA_KALEM_ADAYI") = 1, "Kalem belirsizligi ayri olmali", passed
     Set got = SelectReplyRows(cfg, ws, "ALFA", "yarin teslim", "Acik siparisler hakkinda", reason)
     ReplyAssert InStr(reason, "YANITTA_SIPARIS_KALEM_MALZEME_YOK") = 1, "Genel yanit nedeni ayri olmali", passed
+    context = "4500000001 kalem 10 11.11.2026 teslim"
+    Set got = SelectDeepReplyRows(cfg, ws, "ALFA", "Yarin teslim edilecek", "Acik siparisler hakkinda", context, reason)
+    ReplyAssert got.Count = 1 And got.Exists("2"), "Alintida tek kalem kisa yaniti baglamali", passed
+    ReplyAssert InStr(CStr(got("2")), "11.11.2026") = 0, "Eski alintinin tarihi yeni yanita karismamali", passed
+    context = "4500000001" & vbTab & "00010" & vbTab & "11.11.2026" & vbCrLf & _
+        "4500000001" & vbTab & "00020" & vbTab & "12.11.2026"
+    Set got = SelectDeepReplyRows(cfg, ws, "ALFA", "Kalem 20 yarin teslim", "Acik siparisler hakkinda", context, reason)
+    ReplyAssert got.Count = 1 And got.Exists("3"), "Alintidan siparis yeni yanittan kalem", passed
+    Set got = SelectDeepReplyRows(cfg, ws, "ALFA", "Yarin teslim", "Acik siparisler hakkinda", context, reason)
+    ReplyAssert got.Count = 0, "Alintida iki kalem genel yanita yetmez", passed
+    Set got = SelectDeepReplyRows(cfg, ws, "ALFA", "Tum kalemler yarin teslim", "Acik siparisler hakkinda", context, reason)
+    ReplyAssert got.Count = 2, "Acik tum kalemler yalnizca alintidaki hedeflere uygulanmali", passed
+    Set got = SelectDeepReplyRows(cfg, ws, "ALFA", "Siparis 4999999999 yarin teslim", "Acik siparisler hakkinda", context, reason)
+    ReplyAssert got.Count = 0, "Yeni yanittaki celisen kodu alinti ezmemeli", passed
+    Set got = SelectDeepReplyRows(cfg, ws, "BETA", "Yarin teslim", "Acik siparisler hakkinda", context, reason)
+    ReplyAssert got.Count = 0, "Tek aday olsa bile alintidaki baska siparise yazilmamali", passed
+    cfg("UzunMetinCol") = 5
+    ws.Cells(2, 5).Value = "Hidrolik silindir baglanti aparati"
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "Hidrolik silindir baglanti aparati uretimde", "")
+    ReplyAssert got.Count = 1 And got.Exists("2"), "Tam uzun aciklama benzersizse eslesmeli", passed
+    ws.Cells(3, 5).Value = ws.Cells(2, 5).Value
+    Set got = SelectReplyRows(cfg, ws, "ALFA", "Hidrolik silindir baglanti aparati uretimde", "")
+    ReplyAssert got.Count = 0, "Ortak aciklama iki kaleme yayilmamali", passed
+    ReplyAssert ReplyTopicKey("ALFA", "Acik siparisler hakkinda", "1", "C1") <> _
+        ReplyTopicKey("ALFA", "Acik siparisler hakkinda", "2", "C2"), "Genel baslikta farkli konusmalar ayri kalmali", passed
+    ReplyAssert ReplyTopicKey("ALFA", "RE: Acik siparisler hakkinda", "1", "C1") = _
+        ReplyTopicKey("ALFA", "Acik siparisler hakkinda", "2", "C1"), "Ayni konusmanin tekrar yaniti birlesmeli", passed
+    ReplyAssert InStr(FirstQuotedMessage("Yarin teslim" & vbCrLf & "From: first@example.invalid" & vbCrLf & _
+        "4500000001" & vbCrLf & "From: second@example.invalid" & vbCrLf & "4500000002"), "4500000002") = 0, "Sadece ilk alinti mesaji kullanilmali", passed
+    ReDim objects(1 To 3): ReDim times(1 To 3)
+    For j = 1 To 3
+        Set objects(j) = CreateObject("Scripting.Dictionary")
+        objects(j).Add "id", j
+    Next j
+    times(1) = DateSerial(2026, 11, 1): times(2) = DateSerial(2026, 11, 3): times(3) = DateSerial(2026, 11, 2)
+    SortMailObjects objects, times, 1, 3
+    ReplyAssert objects(1)("id") = 2 And objects(3)("id") = 1, "Alt klasorler birlikte yeniden eskiye siralanmali", passed
+    ReplyAssert ContainsItem("20 nolu kalem yarin teslim", "00020"), "Ters yazilan kalem etiketi", passed
+    ReplyAssert ContainsItem("Kalem (00020) yarin teslim", "20"), "Parantezli kalem etiketi", passed
+    ReplyAssert ContainsItem("4500000001/00020 yarin teslim", "20", "4500000001"), "Siparis bolu kalem bicimi", passed
+    ReplyAssert Not ContainsItem("4500000001 11/20 teslim", "20", "4500000001"), "Tarih kalem numarasi sanilmamali", passed
+    context = "4500000003 kalem 10 yarin teslim"
+    Set got = SelectDeepReplyRows(cfg, ws, "ALFA", "Yarin teslim", "RE: 4500000001", context, reason)
+    ReplyAssert got.Count = 0, "Konu ile celisen alintiyla kalem secilmemeli", passed
+    ReplyAssert ExtractNewReply("Yarin teslim" & vbCrLf & "> 4500000001 kalem 10") = "Yarin teslim", "Buyuktur isaretli eski alinti ayrilmali", passed
+    ReplyAssert InStr(FirstQuotedMessage("Yarin teslim" & vbCrLf & "> 4500000001 kalem 10"), "4500000001") > 0, "Basliksiz alinti baglam icin okunmali", passed
     wb.Close SaveChanges:=False
     MsgBox passed & " kontrol gecti. Outlook'a baglanilmadi; asil kitap degistirilmedi.", vbInformation
     Exit Sub
@@ -2274,10 +2356,15 @@ Private Function NormalizeReplySubject(ByVal subject As String) As String
     NormalizeReplySubject = LCase$(subject)
 End Function
 
-Private Function ReplyTopicKey(ByVal vendor As String, ByVal subject As String, ByVal entryId As String) As String
+Private Function ReplyTopicKey(ByVal vendor As String, ByVal subject As String, ByVal entryId As String, _
+    Optional ByVal conversationId As String = "") As String
     Dim normalized As String
     normalized = NormalizeReplySubject(subject)
-    If Len(normalized) = 0 Then normalized = "ENTRY:" & entryId
+    If Len(normalized) = 0 Then
+        normalized = "ENTRY:" & entryId
+    ElseIf ExtractNumbers(normalized).Count = 0 And Len(conversationId) > 0 Then
+        normalized = normalized & " | CONVERSATION:" & conversationId
+    End If
     ReplyTopicKey = CStr(Len(NormalizeName(vendor))) & ":" & NormalizeName(vendor) & ":" & normalized
 End Function
 
@@ -2372,3 +2459,198 @@ Private Sub ArchivePreviousReply(ByVal ws As Worksheet, ByVal rowNum As Long, _
     history.Cells(r, 8).NumberFormat = "dd.mm.yyyy"
     history.Cells(r, 10).NumberFormat = "dd.mm.yyyy hh:mm:ss"
 End Sub
+
+' The quoted request may identify a row; it never supplies the new status/date/summary.
+Private Function SelectDeepReplyRows(ByRef cfg As Object, ByVal ws As Worksheet, _
+    ByVal vendor As String, ByVal reply As String, ByVal subject As String, _
+    ByVal quoted As String, ByRef reason As String) As Object
+    Dim direct As Object, contextRows As Object, contextual As Object, orders As Object, allOrders As Object
+    Dim r As Long, lastRow As Long, code As String, orderText As String, key As Variant
+    Dim originalReason As String, subjectAgrees As Boolean
+    Set direct = SelectReplyRows(cfg, ws, vendor, reply, subject, reason)
+    If Len(quoted) = 0 Then Set SelectDeepReplyRows = direct: Exit Function
+    originalReason = reason
+    Set orders = CreateObject("Scripting.Dictionary")
+    Set allOrders = CreateObject("Scripting.Dictionary")
+    lastRow = ws.Cells(ws.Rows.Count, CLng(cfg("OrderNoCol"))).End(xlUp).Row
+    For r = CLng(cfg("StartRow")) To lastRow
+        code = NormalizeOrderNo(SafeStr(ws.Cells(r, CLng(cfg("OrderNoCol"))).Value))
+        If Len(code) >= 4 Then allOrders(code) = True
+        If NormalizeName(SafeStr(ws.Cells(r, CLng(cfg("VendorCol"))).Value)) = NormalizeName(vendor) Then
+            code = SafeStr(ws.Cells(r, CLng(cfg("OrderNoCol"))).Value)
+            If Len(code) >= 4 And ContainsCode(quoted, code) Then orders(NormalizeOrderNo(code)) = True
+        End If
+    Next r
+    If direct.Count > 0 Then
+        If Not ReplyHasExplicitCodes(reply) And ExtractNumbers(subject).Count = 0 And Not HasOrderLabel(subject) Then
+            If HasKnownOrder(quoted, allOrders) Or HasOrderLabel(quoted) Then
+                For Each key In direct.Keys
+                    code = SafeStr(ws.Cells(CLng(key), CLng(cfg("OrderNoCol"))).Value)
+                    If Not ContainsCode(quoted, code) Then direct.Remove key
+                Next key
+                If direct.Count = 0 Then
+                    reason = "ALINTI_SIPARISI_CELISIYOR"
+                    Set SelectDeepReplyRows = direct: Exit Function
+                End If
+            End If
+        End If
+        Set SelectDeepReplyRows = direct: Exit Function
+    End If
+    ' If the reply names an order, material or item that conflicts, never overwrite that evidence.
+    If orders.Count = 1 And Not HasOrderLabel(subject) And ExtractNumbers(subject).Count = 0 Then
+        For Each key In orders.Keys: orderText = CStr(key): Next key
+        Set contextual = SelectReplyRows(cfg, ws, vendor, reply, orderText, reason)
+        If contextual.Count > 0 Then
+            reason = "ALINTIDAN_SIPARIS_BAGLAMI | " & reason
+            Set SelectDeepReplyRows = contextual: Exit Function
+        End If
+    End If
+    If ExtractNumbers(subject).Count > 0 Then
+        For Each key In orders.Keys
+            If ContainsCode(subject, CStr(key)) Then subjectAgrees = True
+        Next key
+        If Not subjectAgrees Then
+            reason = originalReason & " | ALINTI_KONU_SIPARISI_CELISIYOR"
+            Set SelectDeepReplyRows = direct: Exit Function
+        End If
+    End If
+    Set contextRows = SelectReplyRows(cfg, ws, vendor, quoted, subject, reason)
+    If orders.Count = 1 And Not ReplyHasExplicitCodes(reply) And HasBusinessReply(reply) Then
+        If contextRows.Count = 1 Or (contextRows.Count > 1 And ExplicitWholeOrder(reply)) Then
+            For Each key In contextRows.Keys
+                direct.Add CStr(key), reply
+            Next key
+            reason = "ALINTIDA_TEK_HEDEF | Aday=" & contextRows.Count
+            Set SelectDeepReplyRows = direct: Exit Function
+        End If
+    End If
+    reason = originalReason & " | AlintiSiparisi=" & orders.Count & " | AlintiHedefi=" & contextRows.Count
+    Set SelectDeepReplyRows = direct
+End Function
+
+Private Function ReplyHasExplicitCodes(ByVal text As String) As Boolean
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "(^|[^a-z0-9])([a-z]+[-_/]?[0-9]{3,}|[0-9]{6,})([^a-z0-9]|$)"
+    ReplyHasExplicitCodes = HasOrderLabel(text) Or HasItemLabel(text) Or re.Test(text)
+End Function
+
+Private Function HasBusinessReply(ByVal text As String) As Boolean
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "(teslim|termin|sevk|kargo|uretim|imalat|stok|iptal|gecik|hazir|teyit|onay|yarin|hafta|bugun|gun sonra)"
+    HasBusinessReply = re.Test(NormalizeName(text))
+End Function
+
+Private Function ExplicitWholeOrder(ByVal text As String) As Boolean
+    Dim t As String
+    t = " " & NormalizeName(text) & " "
+    ExplicitWholeOrder = (InStr(t, " tum kalemler ") > 0 Or InStr(t, " butun kalemler ") > 0 Or _
+        InStr(t, " siparisin tamami ") > 0 Or InStr(t, " listedeki tum kalemler ") > 0)
+End Function
+
+Private Function FirstQuotedMessage(ByVal body As String) As String
+    Dim lines As Variant, part As Variant, line As String, label As String
+    Dim started As Boolean, result As String, primaryHeader As Boolean, re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True: re.Pattern = "^(on .+wrote:|.+tarihinde .+yazd[ýi]:)$"
+    lines = Split(Replace(Replace(StripHtmlArtifacts(body), vbCrLf, vbLf), vbCr, vbLf), vbLf)
+    For Each part In lines
+        line = Trim$(CStr(part)): primaryHeader = False
+        If Left$(line, 1) = ">" Then
+            started = True
+            Do While Left$(line, 1) = ">": line = Trim$(Mid$(line, 2)): Loop
+        End If
+        If InStr(line, ":") > 0 Then
+            label = NormalizeName(Left$(line, InStr(line, ":") - 1))
+            primaryHeader = (label = "FROM" Or label = "KIMDEN" Or label = "GONDEREN")
+        End If
+        primaryHeader = primaryHeader Or re.Test(line)
+        If primaryHeader Then
+            If started And Len(result) > 0 Then Exit For
+            started = True
+        End If
+        If started Then
+            result = result & line & vbCrLf
+            If Len(result) > 24000 Then Exit For
+        End If
+    Next part
+    FirstQuotedMessage = Left$(result, 24000)
+End Function
+
+Private Function SafeConversationId(ByVal mail As Object) As String
+    On Error Resume Next
+    SafeConversationId = SafeStr(mail.ConversationID)
+    On Error GoTo 0
+End Function
+
+' Read-only traversal; all folders are collected before any Excel rows are changed.
+Private Function CollectDeepMails(ByVal root As Object) As Collection
+    Dim objects() As Object, dates() As Date, count As Long, capacity As Long
+    Dim result As Collection, visited As Object, i As Long
+    Set result = New Collection
+    Set visited = CreateObject("Scripting.Dictionary")
+    capacity = 256: ReDim objects(1 To capacity): ReDim dates(1 To capacity)
+    CollectFolder root, objects, dates, count, capacity, visited, 0
+    If count > 1 Then SortMailObjects objects, dates, 1, count
+    For i = 1 To count: result.Add objects(i): Next i
+    WriteLog "DERIN_TARAMA", root.Name, "", "", "Klasor=" & visited.Count & " | OutlookOgesi=" & count
+    Set CollectDeepMails = result
+End Function
+
+Private Sub CollectFolder(ByVal folder As Object, ByRef objects() As Object, ByRef dates() As Date, _
+    ByRef count As Long, ByRef capacity As Long, ByVal visited As Object, ByVal depth As Long)
+    Dim item As Object, child As Object, identity As String, timestamp As Date
+    Dim message As String
+    On Error GoTo Failed
+    If depth > 64 Then Err.Raise vbObjectError + 630, , "Klasor derinligi 64 sinirini asti."
+    identity = CStr(folder.StoreID) & ":" & CStr(folder.EntryID)
+    If visited.Exists(identity) Then Exit Sub
+    visited.Add identity, True
+    For Each item In folder.Items
+        timestamp = SafeReceivedTime(item)
+        count = count + 1
+        If count > capacity Then
+            capacity = capacity + 256
+            ReDim Preserve objects(1 To capacity): ReDim Preserve dates(1 To capacity)
+        End If
+        Set objects(count) = item: dates(count) = timestamp
+    Next item
+    For Each child In folder.Folders
+        CollectFolder child, objects, dates, count, capacity, visited, depth + 1
+    Next child
+    Exit Sub
+Failed:
+    message = Err.Description
+    Err.Raise vbObjectError + 631, "CollectFolder", "Alt klasor taramasi tamamlanamadi: " & message
+End Sub
+
+Private Function SafeReceivedTime(ByVal item As Object) As Date
+    On Error Resume Next
+    SafeReceivedTime = item.ReceivedTime
+    On Error GoTo 0
+End Function
+
+Private Sub SortMailObjects(ByRef objects() As Object, ByRef dates() As Date, ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long, pivot As Date, tmpDate As Date, tmp As Object
+    i = lo: j = hi: pivot = dates((lo + hi) \ 2)
+    Do While i <= j
+        Do While dates(i) > pivot: i = i + 1: Loop
+        Do While dates(j) < pivot: j = j - 1: Loop
+        If i <= j Then
+            tmpDate = dates(i): dates(i) = dates(j): dates(j) = tmpDate
+            Set tmp = objects(i): Set objects(i) = objects(j): Set objects(j) = tmp
+            i = i + 1: j = j - 1
+        End If
+    Loop
+    If lo < j Then SortMailObjects objects, dates, lo, j
+    If i < hi Then SortMailObjects objects, dates, i, hi
+End Sub
+
+Private Function ItemSearchText(ByVal text As String) As String
+    text = Replace(Replace(text, "(", " "), ")", " ")
+    text = Replace(Replace(text, "[", " "), "]", " ")
+    ItemSearchText = NormalizeName(text)
+End Function
