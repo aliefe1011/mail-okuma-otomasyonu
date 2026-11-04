@@ -1,4 +1,4 @@
-# Outlook gelen yanıtlarını Excel'e okuma — VBA 6.2
+# Outlook gelen yanıtlarını Excel'e okuma — VBA 6.3
 
 **Python, PowerShell, Gemini veya API anahtarı gerekmez.** Çalışan mail oluşturma modülüne dokunulmadı. Bu sürüm, yanıtların yanlış sipariş/kalem satırına yazılmasını hedefler.
 
@@ -8,8 +8,17 @@
 2. `macros/AcikSiparis_Yalniz_Gelen_Yanitlari.bas` dosyasını indirin. GitHub dosya sayfasında **Download raw file** düğmesini kullanın; web sayfasını `.bas` diye kaydetmeyin.
 3. Excel'de `Alt+F11`. Soldaki proje ağacından **OnlyReadReplies** modülüne sağ tıklayın; eski modülü dışa aktararak yedekleyin ve kaldırın. Diğer modüllere, özellikle mail oluşturma modülüne dokunmayın.
 4. `File > Import File` ile yeni `.bas` dosyasını ekleyin. `Debug > Compile VBAProject` çalıştırın. Türkçe VBA dışa aktarma kodlaması Windows-1254 korunur; Türkçe olmayan Windows'ta karakterleri ayrıca kontrol edin.
-5. `Alt+F8` → **MailOkumaOzTest** → Çalıştır. Bu kontrol geçici bir kitap açar, örnek satırlarda eşleştirme ve gerçek hücre yazma kontrolleri yapar, kitabı kaydetmeden kapatır. Outlook'a bağlanmaz, gerçek sipariş verisini değiştirmez. Başarılıysa **23 kontrol gecti** mesajı beklenir.
+5. `Alt+F8` → **MailOkumaOzTest** → Çalıştır. Bu kontrol geçici bir kitap açar, örnek satırlarda eşleştirme ve gerçek hücre yazma kontrolleri yapar, kitabı kaydetmeden kapatır. Outlook'a bağlanmaz, gerçek sipariş verisini değiştirmez. Başarılıysa **43 kontrol gecti** mesajı beklenir.
 6. Outlook açıkken `Alt+F8` → **GelenYanitlariOku** → Çalıştır. Kayıtlı `Ayarlar` sayfasını kontrol edip devam edin. Sonucu kopya kitapta doğruladıktan sonra asıl kitaba aynı modülü aktarın.
+
+## Son yanıt, özet ve güncelleme
+
+- Aynı **tedarikçi + konu** için mailler alınma tarihine göre yeniden eskiye sıralanır ve yalnızca en yeni normal yanıt seçilir. `RE:`, `FW:`, `YNT:` ve `[External]` gibi önekler temizlenir; farklı tedarikçi ve farklı sipariş numaralı konular birleştirilmez. Aynı tedarikçinin tamamen aynı başlıkla açtığı bağımsız konuşmalar da tek grup sayılır. Boş başlıklar ileti kimliğiyle ayrılır. Eşit zaman damgalarında Outlook'un sıraladığı ilk ileti seçilir.
+- En yeni ileti önceki çalışmada işlenmiş olsa da aynı grubun eski iletileri tekrar alınmaz. En yeni yanıt belirsizse eski maile dönerek hücre doldurulmaz. Otomatik yanıtlar ve teslim edilemedi bildirimleri başlık/ulaşılabilen mail üstbilgileriyle elenir; her sağlayıcının otomatik mesajını tanıma garantisi yoktur.
+- Gelen yanıt hücresinde yalnızca **son yanıtın tarihli kısa özeti** görünür. Özet, gerçek metinden ilgili satırlar seçilerek çıkarılır; yapay zekâ veya API kullanılmaz. Selam, imza ve tekrarlanan satırlar ayıklanır; teslim/termin/durum/miktar ve olumsuz ifadeler korunmaya çalışılır. En fazla 600 karakterdir; uzun içerikte `...` görünür. Tam mail Outlook'ta kalır.
+- `Mail Atıldı` sütununda `+` olması güncellemeyi engellemez. Daha yeni eşleşen yanıt geldiğinde özet, yanıt tarihi, gönderen, eşleşme yöntemi, durum, termin ve ekler güncellenir. `+` ve yanındaki mevcut yazı korunur. Yeni yanıtta kesin termin veya ek yoksa eski termin/ek yolu temizlenir; eski bilgi yeni yanıtın bilgisi gibi gösterilmez.
+- Üzerine yazılan eski yanıt/durum/termin/ekler **aynı kitaptaki `YanitGecmisi`** sayfasına kaydedilir. Bu isimde farklı amaçlı bir sayfa varsa güncelleme durur; sayfayı koruyup yeniden adlandırın. Bir çalışma sırasında önceki satırlara yapılmış başarılı değişiklikler kalabilir; işlem bütün kitap için atomik değildir.
+- `Pazartesi/Pazar` ve `Cumartesi/Cuma` karışması, gelecek haftaya fazladan yedi gün eklenmesi ve aynı günün gelecek yıla atlaması düzeltildi. Yalnızca “haftaya” veya ay adı verilmişse kesin gün uydurulmaz. Doğal dil yorumlaması kural tabanlıdır; karmaşık veya çelişkili tarih cümleleri insan kontrolü gerektirir.
 
 ## Düzeltmeler
 
@@ -33,4 +42,4 @@
 
 ## Kontrol durumu
 
-Linux ortamında kaynak yapısı, prosedür adları/sınırları, VBA satır uzunlukları, değişen kodun kapsamı ve mail oluşturma dosyasının özgün dosyayla bayt eşitliği kontrol edildi. Windows için modüle **23 kontrol içeren `MailOkumaOzTest`** eklendi. **Bu kontroller burada çalıştırılmadı; Excel/VBA derlemesi ve gerçek Outlook uçtan uca testi de burada yapılamadı.** Çalışan Windows testi sonucu alınmadan makronun sorununuzu kesin çözdüğü iddia edilmez.
+Linux ortamında kaynak yapısı, prosedür adları/sınırları, VBA satır uzunlukları, değişen kodun kapsamı ve mail oluşturma dosyasının özgün dosyayla bayt eşitliği kontrol edildi. Windows için modüle **43 kontrol içeren `MailOkumaOzTest`** eklendi. **Bu kontroller burada çalıştırılmadı; Excel/VBA derlemesi ve gerçek Outlook uçtan uca testi de burada yapılamadı.** Çalışan Windows testi sonucu alınmadan makronun sorununuzu kesin çözdüğü iddia edilmez.

@@ -3,7 +3,7 @@ Option Explicit
 
 '============================================================
 '  ACIK SIPARIS MAIL OTOMASYONU - GELEN YANITLARI OKU
-'  Surum: 6.2 (Tedarikci ve kalem bazli guvenli eslestirme)
+'  Surum: 6.3 (Son yanit, ozet ve mevcut satiri guncelleme)
 '============================================================
 
 Private Const TEST_MODE As Boolean = False
@@ -856,19 +856,18 @@ Private Sub DoReadReplies(ByRef cfg As Object)
     WriteLog "BASLAT", "", "", "", "GelenYanitlariOku", _
              "Inbox: " & inbox.Name & " | Toplam: " & inbox.Items.Count
 
-    For Each mail In inbox.Items
+    Dim sortedItems As Object, seenTopics As Object, topicKey As String
+    Dim duplicateSkipCount As Long, filteredSkipCount As Long
+    Set sortedItems = inbox.Items
+    sortedItems.Sort "[ReceivedTime]", True
+    Set seenTopics = CreateObject("Scripting.Dictionary")
+    seenTopics.CompareMode = vbTextCompare
+    For Each mail In sortedItems
         scanCount = scanCount + 1
         Dim entryId As String: entryId = ""
         On Error Resume Next
         entryId = SafeStr(mail.EntryID)
         On Error GoTo 0
-        If Len(entryId) > 0 Then
-            If GetProcessedMails().Exists(entryId) Then
-                processedSkipCount = processedSkipCount + 1
-                skipCount = skipCount + 1
-                GoTo NextMail
-            End If
-        End If
 
         If Not ReadMailFields(mail, mailDate, senderEmail, senderName, mailSubject, mailBody) Then
             skipCount = skipCount + 1
@@ -908,6 +907,24 @@ Private Sub DoReadReplies(ByRef cfg As Object)
         End If
 
         If Len(vendorName) > 0 Then
+            If IsAutomaticReply(mail, mailSubject) Then
+                filteredSkipCount = filteredSkipCount + 1: skipCount = skipCount + 1
+                GoTo NextMail
+            End If
+            topicKey = ReplyTopicKey(vendorName, mailSubject, entryId)
+            If seenTopics.Exists(topicKey) Then
+                duplicateSkipCount = duplicateSkipCount + 1: skipCount = skipCount + 1
+                GoTo NextMail
+            End If
+            ' Reserve before processed-ID check: an already handled latest mail must hide older copies too.
+            seenTopics.Add topicKey, True
+            If Len(entryId) > 0 Then
+                If GetProcessedMails().Exists(entryId) Then
+                    processedSkipCount = processedSkipCount + 1
+                    skipCount = skipCount + 1
+                    GoTo NextMail
+                End If
+            End If
             replyCount = replyCount + 1
             newReply = ExtractNewReply(mailBody)
             If Len(Trim$(newReply)) = 0 Then
@@ -935,7 +952,8 @@ NextMail:
     Next mail
 
     WriteLog "BITIR", "", "", "", "GelenYanitlariOku", _
-             "Taranan: " & scanCount & ", Islenen: " & replyCount & _
+             "Tekrar konu: " & duplicateSkipCount & ", Otomatik yanit: " & filteredSkipCount & _
+             " | Taranan: " & scanCount & ", Islenen: " & replyCount & _
              ", Guncellenen: " & matchCount & ", Atlanan: " & skipCount
     If gSiparisYokCount > 0 Then
         WriteLog "OZET", "", "", "", "SIPARIS_YOK (acik siparisi olmayan tedarikci sayisi): " & gSiparisYokCount
@@ -953,6 +971,8 @@ NextMail:
            T("Excel'de g~uncellenen sat~ir: ") & matchCount & vbCrLf & _
            T("Belirsiz (e~sle~smeyen): ") & gBelirsizCount & vbCrLf & _
            T("Atlanan (i~slenmi~s): ") & processedSkipCount & vbCrLf & _
+           "Atlanan (ayni konu): " & duplicateSkipCount & vbCrLf & _
+           "Atlanan (otomatik yanit): " & filteredSkipCount & vbCrLf & _
            T("Atlanan (tarih): ") & dateSkipCount & vbCrLf & _
            T("Atlanan (dahili): ") & internalSkipCount & vbCrLf & _
            T("A~c~ik sipari~si olmayan tedarik~ci: ") & gSiparisYokCount, _
@@ -980,6 +1000,7 @@ Private Function WriteReplyToSheet(ByRef cfg As Object, ByVal ws As Worksheet, _
             If CDate(ws.Cells(r, CLng(cfg("ReplyDateCol"))).Value) >= mailDate Then GoTo NextMatch
         End If
         replyText = CStr(matches(key))
+        If Len(SummarizeReply(replyText)) = 0 Then GoTo NextMatch
         WriteReplyToRow ws, r, replyText, mailDate, senderEmail, matchMethod & " / kalem-dogrulandi", _
             attachmentList, CLng(cfg("ReplyCol")), CLng(cfg("ReplyDateCol")), _
             CLng(cfg("ReplyFromCol")), CLng(cfg("MatchMethodCol")), CLng(cfg("AttachCol")), _
@@ -1190,27 +1211,27 @@ Private Sub WriteReplyToRow(ByVal ws As Worksheet, ByVal rowNum As Long, _
     Dim terminDate As Variant, statusText As String
     If rBC < 1 Or rDC < 1 Then Exit Sub
     existing = SafeStr(ws.Cells(rowNum, rBC).Value)
-    combined = AppendReplyHistory(existing, newReply, mailDate)
+    ArchivePreviousReply ws, rowNum, rBC, rDC, rFC, rAC, dCol, tCol, mailDate
+    combined = "[" & Format$(mailDate, "dd.mm.yyyy hh:nn") & "] " & SummarizeReply(newReply)
     If Len(combined) > MAX_BODY_LEN Then combined = Left$(combined, MAX_BODY_LEN)
     ws.Cells(rowNum, rBC).Value = combined
     ws.Cells(rowNum, rDC).Value = mailDate
     If rFC > 0 Then ws.Cells(rowNum, rFC).Value = senderEmail
     If rMC > 0 Then ws.Cells(rowNum, rMC).Value = matchMethod
-    If rAC > 0 And Len(attachmentList) > 0 Then ws.Cells(rowNum, rAC).Value = attachmentList
+    If rAC > 0 Then ws.Cells(rowNum, rAC).Value = attachmentList
 
     Dim dateSource As String
     If Len(explicitDateText) > 0 Then dateSource = explicitDateText Else dateSource = newReply
     Err.Clear
     terminDate = ParseTurkishDate(dateSource, mailDate)
     If tCol > 0 Then
-        On Error Resume Next
+        ws.Cells(rowNum, tCol).ClearContents
         If Not IsEmpty(terminDate) Then
             If IsDate(terminDate) Then
                 ws.Cells(rowNum, tCol).Value = terminDate
                 ws.Cells(rowNum, tCol).NumberFormat = "dd.mm.yyyy"
             End If
         End If
-        On Error GoTo 0
     End If
     If dCol > 0 Then
         statusText = ClassifyStatus(newReply, Not IsEmpty(terminDate))
@@ -1229,20 +1250,12 @@ Private Sub WriteReplyToRow(ByVal ws As Worksheet, ByVal rowNum As Long, _
     End If
 End Sub
 
-Private Function AppendReplyHistory(ByVal existing As String, ByVal newReply As String, _
-                                     ByVal mailDate As Date) As String
-    Dim entry As String
-    entry = "[" & Format(mailDate, "dd.mm.yyyy hh:nn") & "] " & Trim$(newReply)
-    If Len(Trim$(existing)) = 0 Then
-        AppendReplyHistory = entry
-    Else
-        AppendReplyHistory = existing & vbCrLf & String(30, "-") & vbCrLf & entry
-    End If
-End Function
+
 
 
 
 Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) As Variant
+    refDate = DateValue(refDate)
     Dim t As String: t = LCase$(text)
     t = Replace(t, ChrW(305), "i"): t = Replace(t, ChrW(351), "s")
     t = Replace(t, ChrW(287), "g"): t = Replace(t, ChrW(252), "u")
@@ -1263,10 +1276,11 @@ Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) A
         If d1 >= 1 And d1 <= 31 And m1 >= 1 And m1 <= 12 Then
             Err.Clear
             Dim dt1 As Date: dt1 = DateSerial(y1, m1, d1)
-            If Err.Number = 0 Then
+            If Err.Number = 0 And Year(dt1) = y1 And Month(dt1) = m1 And Day(dt1) = d1 Then
                 ParseTurkishDate = dt1: Exit Function
             End If
         End If
+        Exit Function
     End If
     
     ' 2) dd.mm.yyyy veya dd.mm formatý
@@ -1284,13 +1298,14 @@ Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) A
             End If
             Err.Clear
             Dim dt As Date: dt = DateSerial(yy, mm, dd)
-            If Err.Number = 0 Then
+            If Err.Number = 0 And Month(dt) = mm And Day(dt) = dd Then
                 If dt < refDate And Len(m(0).SubMatches(2)) = 0 Then
                     dt = DateSerial(yy + 1, mm, dd)
                 End If
                 ParseTurkishDate = dt: Exit Function
             End If
         End If
+        Exit Function
     End If
     If InStr(t, "yarin") > 0 Then ParseTurkishDate = refDate + 1: Exit Function
     If InStr(t, "bugun") > 0 Then ParseTurkishDate = refDate: Exit Function
@@ -1298,12 +1313,14 @@ Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) A
     Dim dayNames As Variant, i As Long
     dayNames = Array("pazar", "pazartesi", "sali", "carsamba", "persembe", "cuma", "cumartesi")
     For i = 0 To 6
-        If InStr(t, dayNames(i)) > 0 Then
+        re.Pattern = "(^|[^a-z])" & dayNames(i) & "([^a-z]|$)"
+        If re.Test(t) Then
             Dim targetDay As Long: targetDay = i + 1
             Dim diff As Long
             diff = (targetDay - Weekday(refDate) + 7) Mod 7
             If diff = 0 Then diff = 7
-            If InStr(t, "haftaya") > 0 Or InStr(t, "gelecek hafta") > 0 Then diff = diff + 7
+            If InStr(t, "haftaya") > 0 Or InStr(t, "gelecek hafta") > 0 Then _
+                diff = 8 - Weekday(refDate, vbMonday) + ((targetDay + 5) Mod 7)
             ParseTurkishDate = refDate + diff: Exit Function
         End If
     Next i
@@ -1312,6 +1329,7 @@ Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) A
     Set m = re.Execute(t)
     If m.Count > 0 Then
         Dim nDays As Long: nDays = CLng(m(0).SubMatches(0))
+        If nDays > 3650 Then Exit Function
         Dim isBusiness As Boolean: isBusiness = (InStr(LCase$(m(0).Value), "is") > 0)
         If isBusiness Then
             Dim cnt As Long, curDate As Date: curDate = refDate: cnt = 0
@@ -1325,32 +1343,28 @@ Private Function ParseTurkishDate(ByVal text As String, ByVal refDate As Date) A
         End If
         Exit Function
     End If
-    If InStr(t, "gelecek hafta") > 0 Then ParseTurkishDate = refDate + 7: Exit Function
-    If InStr(t, "haftaya") > 0 Then ParseTurkishDate = refDate + 7: Exit Function
+    If InStr(t, "gelecek hafta") > 0 Or InStr(t, "haftaya") > 0 Then Exit Function
     Dim months As Variant, mi As Long
     months = Array("ocak", "subat", "mart", "nisan", "mayis", "haziran", _
                    "temmuz", "agustos", "eylul", "ekim", "kasim", "aralik")
     For mi = 0 To 11
         If InStr(t, months(mi)) > 0 Then
-            re.Pattern = "(\d{1,2})\s*" & months(mi)
+            re.Pattern = "(\d{1,2})\s*" & months(mi) & "(?:\s+(\d{4}))?"
             Set m = re.Execute(t)
             If m.Count > 0 Then
                 dd = CLng(m(0).SubMatches(0))
                 If dd >= 1 And dd <= 31 Then
                     Err.Clear
-                    dt = DateSerial(Year(refDate), mi + 1, dd)
-                    If Err.Number = 0 Then
-                        If dt < refDate Then dt = DateSerial(Year(refDate) + 1, mi + 1, dd)
+                    yy = Year(refDate)
+                    If Len(m(0).SubMatches(1)) > 0 Then yy = CLng(m(0).SubMatches(1))
+                    dt = DateSerial(yy, mi + 1, dd)
+                    If Err.Number = 0 And Year(dt) = yy And Month(dt) = mi + 1 And Day(dt) = dd Then
+                        If dt < refDate And Len(m(0).SubMatches(1)) = 0 Then dt = DateSerial(yy + 1, mi + 1, dd)
                         ParseTurkishDate = dt: Exit Function
                     End If
                 End If
             End If
-            Err.Clear
-            dt = DateSerial(Year(refDate), mi + 2, 0)
-            If Err.Number = 0 Then
-                If dt < refDate Then dt = DateSerial(Year(refDate) + 1, mi + 2, 0)
-                ParseTurkishDate = dt: Exit Function
-            End If
+            Exit Function ' A month without a day is not a confirmed delivery date.
         End If
     Next mi
     On Error GoTo 0
@@ -1541,7 +1555,7 @@ Private Function IsReplyHeader(ByVal label As String) As Boolean
     Dim t As String
     t = NormalizeName(label)
     IsReplyHeader = (t = "FROM" Or t = "GONDEREN" Or t = "KIMDEN" Or t = "SENT" Or _
-        t = "GONDERILMIS" Or t = "GONDERILDI")
+        t = "GONDERILMIS" Or t = "GONDERILDI" Or t = "GONDERME TARIHI" Or t = "SENT ON")
 End Function
 
 Private Function FilterRelevantContent(ByVal raw As String) As String
@@ -2136,6 +2150,28 @@ Public Sub MailOkumaOzTest()
     ReplyAssert n = 1 And Len(SafeStr(ws.Cells(3, 8).Value)) = 0 And Len(SafeStr(ws.Cells(4, 8).Value)) = 0, "Gercek yazma yalnizca hedef satira", passed
     n = WriteReplyToSheet(cfg, ws, "ALFA", "4500000001 kalem 10 10.11.2026 teslim", DateSerial(2026, 11, 3), "test@example.invalid", "test", "", False)
     ReplyAssert n = 0 And InStr(SafeStr(ws.Cells(2, 8).Value), "10.11.2026") = 0, "Eski mail yeni yaniti ezmemeli", passed
+    ReplyAssert NormalizeReplySubject("RE: YNT: [External] Siparis 4500000001") = "siparis 4500000001", "Konu onekleri temizlenmeli", passed
+    ReplyAssert ReplyTopicKey("ALFA", "RE: Siparis 4500000001", "1") = ReplyTopicKey("ALFA", "Siparis 4500000001", "2"), "Ayni konu tek grup olmali", passed
+    ReplyAssert ReplyTopicKey("ALFA", "Siparis 4500000001", "1") <> ReplyTopicKey("BETA", "Siparis 4500000001", "2"), "Farkli tedarikciler birlesmemeli", passed
+    ReplyAssert ReplyTopicKey("ALFA", "Siparis 4500000001", "1") <> ReplyTopicKey("ALFA", "Siparis 4500000002", "2"), "Farkli siparis konulari birlesmemeli", passed
+    ReplyAssert SummarizeReply("Merhaba" & vbCrLf & "Yarin teslim edilecek" & vbCrLf & "Yarin teslim edilecek" & vbCrLf & "Saygilarimla") = "Yarin teslim edilecek", "Ozet selam imza ve tekrari cikarmali", passed
+    ReplyAssert InStr(SummarizeReply("Yarin teslim edilemez, stok yok."), "edilemez") > 0, "Ozet olumsuzlugu korumali", passed
+    ws.Cells(2, 13).Value = "+ Mail atildi"
+    n = WriteReplyToSheet(cfg, ws, "ALFA", "4500000001 kalem 10 stok yok", DateSerial(2026, 11, 5), "test@example.invalid", "test", "", False)
+    ReplyAssert n = 1 And InStr(SafeStr(ws.Cells(2, 8).Value), "stok yok") > 0, "Arti olan satir yeni maille guncellenmeli", passed
+    ReplyAssert InStr(SafeStr(ws.Cells(2, 8).Value), "11.11.2026") = 0 And IsEmpty(ws.Cells(2, 15).Value), "Eski ozet ve termin temizlenmeli", passed
+    ReplyAssert ws.Cells(2, 13).Value = "+ Mail atildi", "Mail atildi isareti korunmali", passed
+    ReplyAssert wb.Worksheets("YanitGecmisi").Cells(2, 4).Value <> "", "Onceki yanit arsivlenmeli", passed
+    ReplyAssert InStr(SummarizeReply("Merhaba, yarin teslim edilecek."), "teslim") > 0, "Selamla ayni satirdaki teslim bilgisi korunmali", passed
+    ReplyAssert InStr(SummarizeReply("Kargo takip: https://example.invalid/123"), "https://") > 0, "Kargo baglantisi korunmali", passed
+    ReplyAssert InStr(SummarizeReply("4500000001" & vbTab & "00010" & vbTab & "11.11.2026"), "11.11.2026") > 0, "Sayisal tablo telefon sanilmamali", passed
+    ReplyAssert ParseTurkishDate("pazartesi", DateSerial(2026, 11, 4)) = DateSerial(2026, 11, 9), "Pazartesi pazarla karismamali", passed
+    ReplyAssert ParseTurkishDate("haftaya pazartesi", DateSerial(2026, 11, 4)) = DateSerial(2026, 11, 9), "Gelecek hafta fazladan yedi gun eklenmemeli", passed
+    ReplyAssert IsEmpty(ParseTurkishDate("haftaya teslim", DateSerial(2026, 11, 4))), "Belirsiz haftadan kesin tarih uydurulmamali", passed
+    ReplyAssert ParseTurkishDate("04.11", DateSerial(2026, 11, 4) + TimeSerial(15, 0, 0)) = DateSerial(2026, 11, 4), "Ayni gun gelecek yila atlamamali", passed
+    ReplyAssert IsEmpty(ParseTurkishDate("31.02.2026", DateSerial(2026, 11, 4))), "Gecersiz tarih baska aya kaymamali", passed
+    ReplyAssert IsEmpty(ParseTurkishDate("2026-02-30", DateSerial(2026, 11, 4))), "Gecersiz ISO tarih yeniden yorumlanmamali", passed
+    ReplyAssert ParseTurkishDate("12 kasim 2027", DateSerial(2026, 11, 4)) = DateSerial(2027, 11, 12), "Yazili ayda acik yil korunmali", passed
     wb.Close SaveChanges:=False
     MsgBox passed & " kontrol gecti. Outlook'a baglanilmadi; asil kitap degistirilmedi.", vbInformation
     Exit Sub
@@ -2150,4 +2186,117 @@ End Sub
 Private Sub ReplyAssert(ByVal condition As Boolean, ByVal title As String, ByRef passed As Long)
     If Not condition Then Err.Raise vbObjectError + 620, "MailOkumaOzTest", title
     passed = passed + 1
+End Sub
+
+Private Function NormalizeReplySubject(ByVal subject As String) As String
+    Dim re As Object, before As String
+    subject = Trim$(Replace(subject, ChrW(160), " "))
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True: re.Global = False
+    re.Pattern = "^\s*(\[(external|dis|spam)\]\s*|(re|fw|fwd|ynt|ilt|yanit|yanýt)(\[[0-9]+\])?\s*:\s*)"
+    Do
+        before = subject
+        subject = Trim$(re.Replace(subject, ""))
+    Loop Until before = subject
+    ' Preserve punctuation and order/item numbers; do not merge similar but distinct subjects.
+    NormalizeReplySubject = LCase$(subject)
+End Function
+
+Private Function ReplyTopicKey(ByVal vendor As String, ByVal subject As String, ByVal entryId As String) As String
+    Dim normalized As String
+    normalized = NormalizeReplySubject(subject)
+    If Len(normalized) = 0 Then normalized = "ENTRY:" & entryId
+    ReplyTopicKey = CStr(Len(NormalizeName(vendor))) & ":" & NormalizeName(vendor) & ":" & normalized
+End Function
+
+Private Function IsAutomaticReply(ByVal mail As Object, ByVal subject As String) As Boolean
+    Dim t As String, headers As String, re As Object
+    t = NormalizeName(NormalizeReplySubject(subject))
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "^(automatic reply|auto reply|out of office|otomatik yanit|otomatik cevap|undeliverable|delivery status notification|iletilemedi)( |$)"
+    If re.Test(t) Then IsAutomaticReply = True: Exit Function
+    ' Optional transport headers; absence is not an error for ordinary mail.
+    On Error Resume Next
+    headers = SafeStr(mail.PropertyAccessor.GetProperty("http://schemas.microsoft.com/mapi/proptags/0x007D001E"))
+    On Error GoTo 0
+    re.MultiLine = True
+    re.Pattern = "^Auto-Submitted:[ \t]*(auto-replied|auto-generated)([ \t;]|$)"
+    IsAutomaticReply = re.Test(Replace(headers, vbCrLf, vbLf))
+End Function
+
+Private Function SummarizeReply(ByVal reply As String) As String
+    Dim lines As Variant, part As Variant, line As String, norm As String
+    Dim selected As String, fallback As String, seen As Object, re As Object, business As Boolean
+    Set seen = CreateObject("Scripting.Dictionary")
+    Set re = CreateObject("VBScript.RegExp")
+    re.IgnoreCase = True
+    re.Pattern = "(teslim|termin|sevk|kargo|uretim|imalat|stok|iptal|gecik|bekle|hazir|plan|teyit|onay|tarih|siparis|kalem|malzeme|yarin|bugun|hafta|gun|adet|miktar|yok|degil|edileme|edem|olmaz)"
+    lines = Split(Replace(Replace(reply, vbCrLf, vbLf), vbCr, vbLf), vbLf)
+    For Each part In lines
+        line = Trim$(Replace(CStr(part), vbTab, " | "))
+        If IsSignatureStart(line) Then Exit For
+        norm = NormalizeName(line)
+        If Len(norm) = 0 Then GoTo NextSummaryLine
+        business = re.Test(norm)
+        If IsGreeting(line) And Not business And Not HasDateOrNumber(line) Then GoTo NextSummaryLine
+        If Not business And InStr(CStr(part), vbTab) = 0 Then
+            If IsLegalDisclaimer(line) Or IsPhoneLine(line) Or IsUrlLine(line) Then GoTo NextSummaryLine
+        End If
+        If Left$(line, 1) = ">" Then GoTo NextSummaryLine
+        If seen.Exists(norm) Then GoTo NextSummaryLine
+        seen.Add norm, True
+        If Len(fallback) = 0 Then fallback = line
+        If business Or HasDateOrNumber(line) Then
+            If Len(selected) > 0 Then selected = selected & " / "
+            selected = selected & line
+        End If
+NextSummaryLine:
+    Next part
+    If Len(selected) = 0 Then selected = fallback
+    If Len(selected) > 600 Then selected = Left$(selected, 597) & "..."
+    SummarizeReply = selected
+End Function
+
+Private Sub ArchivePreviousReply(ByVal ws As Worksheet, ByVal rowNum As Long, _
+    ByVal replyCol As Long, ByVal dateCol As Long, ByVal senderCol As Long, _
+    ByVal attachCol As Long, ByVal statusCol As Long, ByVal terminCol As Long, ByVal replacedAt As Date)
+    Dim history As Worksheet, r As Long, i As Long, headers As Variant
+    If Len(SafeStr(ws.Cells(rowNum, replyCol).Value)) = 0 Then Exit Sub
+    On Error Resume Next
+    Set history = ws.Parent.Worksheets("YanitGecmisi")
+    On Error GoTo 0
+    If history Is Nothing Then
+        Set history = ws.Parent.Worksheets.Add(After:=ws.Parent.Worksheets(ws.Parent.Worksheets.Count))
+        history.Name = "YanitGecmisi"
+        headers = Array("Arsiv Zamani", "Sayfa", "Satir", "Onceki Yanit", "Onceki Yanit Tarihi", "Onceki Gonderen", "Onceki Durum", "Onceki Termin", "Onceki Ekler", "Yeni Mail Tarihi")
+        For i = LBound(headers) To UBound(headers)
+            history.Cells(1, i + 1).Value = headers(i)
+        Next i
+        history.Rows(1).Font.Bold = True
+    End If
+    If SafeStr(history.Cells(1, 1).Value) <> "Arsiv Zamani" Or SafeStr(history.Cells(1, 4).Value) <> "Onceki Yanit" Then
+        Err.Raise vbObjectError + 621, , "YanitGecmisi adinda farkli bir sayfa var. Sayfayi yedekleyip yeniden adlandirin."
+    End If
+    r = history.Cells(history.Rows.Count, 1).End(xlUp).Row + 1
+    history.Cells(r, 1).Value = Now
+    history.Cells(r, 2).NumberFormat = "@": history.Cells(r, 2).Value = ws.Name
+    history.Cells(r, 3).Value = rowNum
+    history.Cells(r, 4).NumberFormat = "@": history.Cells(r, 4).Value = SafeStr(ws.Cells(rowNum, replyCol).Value)
+    history.Cells(r, 5).Value = ws.Cells(rowNum, dateCol).Value
+    If senderCol > 0 Then
+        history.Cells(r, 6).NumberFormat = "@": history.Cells(r, 6).Value = SafeStr(ws.Cells(rowNum, senderCol).Value)
+    End If
+    If statusCol > 0 Then
+        history.Cells(r, 7).NumberFormat = "@": history.Cells(r, 7).Value = SafeStr(ws.Cells(rowNum, statusCol).Value)
+    End If
+    If terminCol > 0 Then history.Cells(r, 8).Value = ws.Cells(rowNum, terminCol).Value
+    If attachCol > 0 Then
+        history.Cells(r, 9).NumberFormat = "@": history.Cells(r, 9).Value = SafeStr(ws.Cells(rowNum, attachCol).Value)
+    End If
+    history.Cells(r, 10).Value = replacedAt
+    history.Cells(r, 1).NumberFormat = "dd.mm.yyyy hh:mm:ss"
+    history.Cells(r, 5).NumberFormat = "dd.mm.yyyy hh:mm:ss"
+    history.Cells(r, 8).NumberFormat = "dd.mm.yyyy"
+    history.Cells(r, 10).NumberFormat = "dd.mm.yyyy hh:mm:ss"
 End Sub
