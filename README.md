@@ -1,0 +1,1 @@
+# mail-okuma-yar-otomatik
