@@ -16,10 +16,7 @@ Private Const HEADER_ROW As Long = 1
 Private Const DEFAULT_START_ROW As Long = 2
 Private Const DRAFT_MARK As String = "+"
 Private Const NOT_FOUND_MARK As String = "MAIL BULUNAMADI"
-Private Const CC_RECIPIENTS As String = _
-    "emre.turk@assanaluminyum.com;" & _
-    "cihan.aydemir@assanaluminyum.com;" & _
-    "erdem.sokat@assanaluminyum.com"
+Private Const CC_RECIPIENTS As String = ""
 
 ' --- VARSAYILAN SÜTUNLAR (Ayarlar sayfasýna göre güncellendi) ---
 Private Const DEF_COL_ORDER_NO As String = "F"
